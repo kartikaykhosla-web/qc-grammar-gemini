@@ -11,6 +11,8 @@ import requests
 import tempfile
 import streamlit as st
 from bs4 import BeautifulSoup
+from google.oauth2 import service_account
+import json
 
 # ===================== NLP =====================
 import spacy
@@ -61,9 +63,17 @@ REGION = "us-central1"
 
 @st.cache_resource
 def init_vertex():
-    vertexai.init(project=PROJECT_ID, location=REGION)
-    return True
+    creds = service_account.Credentials.from_service_account_info(
+        json.loads(os.environ["GCP_SERVICE_ACCOUNT_JSON"])
+    )
 
+    vertexai.init(
+        project=PROJECT_ID,
+        location=REGION,
+        credentials=creds
+    )
+
+    return True
 
 try:
     init_vertex()
