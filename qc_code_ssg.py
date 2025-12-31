@@ -271,11 +271,18 @@ TEXT:
 {chr(10).join(paragraphs)}
 """
 
-    try:
-        return model.generate_content(prompt).text
-    except Exception as e:
-        return f"⚠️ Gemini unavailable:\n\n{e}"
-
+    with st.spinner("🤖 Gemini is reviewing the article… this may take 30–60 seconds"):
+        try:
+            response = model.generate_content(
+                prompt,
+                generation_config={
+                    "temperature": 0.1,
+                    "max_output_tokens": 2048,
+                }
+            )
+            return response.text
+        except Exception as e:
+            return f"⚠️ Gemini request failed:\n\n{e}"
 
 # =================================================
 # PIPELINE
