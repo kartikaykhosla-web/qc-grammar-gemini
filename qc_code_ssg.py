@@ -270,6 +270,7 @@ Rules (STRICT):
 - If the text is not a complete sentence, do NOT suggest a correction
 - If unsure, return the Original unchanged
 - Do NOT normalize legal or political references
+- You MAY correct possessive plurality errors if the correction does not change meaning
 
 CRITICAL CONSTRAINTS:
 - You may ONLY use text that appears verbatim in the TEXT section
