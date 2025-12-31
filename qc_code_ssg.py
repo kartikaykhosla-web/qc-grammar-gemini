@@ -132,6 +132,7 @@ def clean_article(url):
 # LOAD MODELS
 # =================================================
 @st.cache_resource
+@st.cache_resource
 def load_nlp():
     return spacy.load("en_core_web_sm")
 
