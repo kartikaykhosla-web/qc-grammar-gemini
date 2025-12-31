@@ -248,8 +248,10 @@ def correct_grammar_languagetool(text):
 def gemini_grammar_review(article_data):
     model = init_vertex_and_model()
 
+    MAX_PARA_CHARS = 1800  # safe upper bound for Gemini Pro
+
     paragraphs = [
-        text[:900]
+        text if len(text) <= MAX_PARA_CHARS else text[:MAX_PARA_CHARS]
         for ctype, text in article_data
         if ctype == "paragraph"
     ]
@@ -271,18 +273,10 @@ TEXT:
 {chr(10).join(paragraphs)}
 """
 
-    with st.spinner("🤖 Gemini is reviewing the article… this may take 30–60 seconds"):
-        try:
-            response = model.generate_content(
-                prompt,
-                generation_config={
-                    "temperature": 0.1,
-                    "max_output_tokens": 2048,
-                }
-            )
-            return response.text
-        except Exception as e:
-            return f"⚠️ Gemini request failed:\n\n{e}"
+    try:
+        return model.generate_content(prompt).text
+    except Exception as e:
+        return f"⚠️ Gemini unavailable:\n\n{e}"
 
 # =================================================
 # PIPELINE
