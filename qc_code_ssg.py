@@ -7,12 +7,12 @@ OLD FORMAT RESTORED + EDITORIAL SAFETY FIXES
 # ===================== CORE =====================
 import re
 import os
+import json
 import requests
 import tempfile
 import streamlit as st
 from bs4 import BeautifulSoup
 from google.oauth2 import service_account
-import json
 
 # ===================== NLP =====================
 import spacy
@@ -28,6 +28,7 @@ from docx import Document
 
 # ===================== GRAMMAR =====================
 import language_tool_python
+from language_tool_python.exceptions import RateLimitError
 
 # ===================== VERTEX AI =====================
 import vertexai
@@ -35,7 +36,7 @@ from vertexai.generative_models import GenerativeModel
 
 
 # =================================================
-# STREAMLIT CONFIG (OLD STYLE)
+# STREAMLIT CONFIG
 # =================================================
 st.set_page_config(page_title="Article QC Tool (Gemini 2.5)", layout="wide")
 st.title("🧪 Article QC Tool (Gemini 2.5 – Vertex AI)")
@@ -43,33 +44,43 @@ st.caption("Spelling · Grammar · Editorial Safety · AI Review")
 
 
 # =================================================
-# 🔑 VERTEX AI AUTH (STREAMLIT SAFE)
+# 🔑 VERTEX AI AUTH (HARDENED)
 # =================================================
-if "GCP_SERVICE_ACCOUNT_JSON" not in os.environ:
-    st.error("❌ GCP_SERVICE_ACCOUNT_JSON not set")
-    st.stop()
-
 PROJECT_ID = "prod-project-jnm-smart-cms"
 REGION = "us-central1"
+CRED_PATH = "/tmp/gcp_service_account.json"
+
+def load_gcp_credentials():
+    raw = os.environ.get("GCP_SERVICE_ACCOUNT_JSON")
+    if not raw:
+        st.error("❌ GCP_SERVICE_ACCOUNT_JSON not set")
+        st.stop()
+
+    try:
+        # Handle escaped newlines
+        raw = raw.replace("\\n", "\n")
+        creds_dict = json.loads(raw)
+    except Exception as e:
+        st.error("❌ Invalid GCP_SERVICE_ACCOUNT_JSON format")
+        st.exception(e)
+        st.stop()
+
+    with open(CRED_PATH, "w") as f:
+        json.dump(creds_dict, f)
+
+    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = CRED_PATH
+    return service_account.Credentials.from_service_account_info(creds_dict)
 
 
 @st.cache_resource
-def init_vertex():
-    creds = service_account.Credentials.from_service_account_info(
-        json.loads(os.environ["GCP_SERVICE_ACCOUNT_JSON"])
-    )
-
+def init_vertex_and_model():
+    creds = load_gcp_credentials()
     vertexai.init(
         project=PROJECT_ID,
         location=REGION,
-        credentials=creds
+        credentials=creds,
     )
-    return True
 
-
-@st.cache_resource
-def get_gemini_model():
-    init_vertex()
     try:
         st.success("✅ Gemini 2.5 Pro loaded")
         return GenerativeModel("publishers/google/models/gemini-2.5-pro")
@@ -180,11 +191,6 @@ def extract_numbers(text):
     return re.findall(r"\d[\d.,]*", text)
 
 
-def semantic_safe(a, b, t=0.92):
-    from difflib import SequenceMatcher
-    return SequenceMatcher(None, a, b).ratio() >= t
-
-
 # =================================================
 # SPELLING + GRAMMAR
 # =================================================
@@ -226,29 +232,18 @@ def correct_grammar_languagetool(text):
         return text
 
     try:
-        corrected = language_tool_python.utils.correct(
-            text, lt_tool.check(text)
-        )
-    except language_tool_python.exceptions.RateLimitError:
-        return text
+        return language_tool_python.utils.correct(text, lt_tool.check(text))
+    except RateLimitError:
+        return text  # FAIL OPEN — do not crash app
     except Exception:
         return text
-
-    if extract_numbers(text) != extract_numbers(corrected):
-        return text
-    if not extract_named_entities(text).issubset(
-        extract_named_entities(corrected)
-    ):
-        return text
-
-    return corrected
 
 
 # =================================================
 # GEMINI QC — OLD TABLE FORMAT
 # =================================================
 def gemini_grammar_review(article_data):
-    model = get_gemini_model()
+    model = init_vertex_and_model()
 
     paragraphs = [
         text[:900]
@@ -273,7 +268,10 @@ TEXT:
 {chr(10).join(paragraphs)}
 """
 
-    return model.generate_content(prompt).text
+    try:
+        return model.generate_content(prompt).text
+    except Exception as e:
+        return f"⚠️ Gemini unavailable:\n\n{e}"
 
 
 # =================================================
