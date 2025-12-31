@@ -225,9 +225,14 @@ def correct_grammar_languagetool(text):
     if not lt_tool:
         return text
 
-    corrected = language_tool_python.utils.correct(
-        text, lt_tool.check(text)
-    )
+    try:
+        corrected = language_tool_python.utils.correct(
+            text, lt_tool.check(text)
+        )
+    except language_tool_python.exceptions.RateLimitError:
+        return text
+    except Exception:
+        return text
 
     if extract_numbers(text) != extract_numbers(corrected):
         return text
