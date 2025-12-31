@@ -47,7 +47,7 @@ if "GCP_SERVICE_ACCOUNT_JSON" not in os.environ:
     st.error("❌ GCP_SERVICE_ACCOUNT_JSON not set")
     st.stop()
 
-CREDENTIALS_PATH = "/home/adminuser/gcp_service_account.json"
+CREDENTIALS_PATH = "/tmp/gcp_service_account.json"
 
 if not os.path.exists(CREDENTIALS_PATH):
     with open(CREDENTIALS_PATH, "w") as f:
