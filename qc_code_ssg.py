@@ -47,10 +47,13 @@ if "GCP_SERVICE_ACCOUNT_JSON" not in os.environ:
     st.error("❌ GCP_SERVICE_ACCOUNT_JSON not set")
     st.stop()
 
-if "GOOGLE_APPLICATION_CREDENTIALS" not in os.environ:
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".json") as f:
-        f.write(os.environ["GCP_SERVICE_ACCOUNT_JSON"].encode("utf-8"))
-        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = f.name
+CREDENTIALS_PATH = "/home/adminuser/gcp_service_account.json"
+
+if not os.path.exists(CREDENTIALS_PATH):
+    with open(CREDENTIALS_PATH, "w") as f:
+        f.write(os.environ["GCP_SERVICE_ACCOUNT_JSON"])
+
+os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = CREDENTIALS_PATH
 
 PROJECT_ID = "prod-project-jnm-smart-cms"
 REGION = "us-central1"
