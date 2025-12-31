@@ -256,21 +256,33 @@ def gemini_grammar_review(article_data):
         if ctype == "paragraph"
     ]
 
-    prompt = f"""
+   prompt = f"""
 You are a professional proofreader.
 
-Rules:
+Rules (STRICT):
+- Review each paragraph independently
+- Do NOT use context from other paragraphs
 - Only fix spelling and grammar
-- Do NOT infer facts
+- Do NOT infer facts or speakers
 - Do NOT change numbers
-- Do NOT rename people or cases
-- Do NOT normalize legal citations
+- NEVER change proper nouns, political parties, or person names
+- NEVER rename quoted speakers
+- If the text is not a complete sentence, do NOT suggest a correction
+- If unsure, return the Original unchanged
+- Do NOT normalize legal or political references
+
+CRITICAL CONSTRAINTS:
+- You may ONLY use text that appears verbatim in the TEXT section
+- NEVER invent new examples, phrases, or sentences
+- The "Original" column MUST be an exact, character-for-character substring of the provided TEXT
+- If no correction is required, DO NOT create a table row
+- If you cannot find an exact match in the TEXT, do NOT include it
 
 Return output strictly as a table:
 | Original | Corrected | Reason |
 
 TEXT:
-{chr(10).join(paragraphs)}
+{chr(10).join(f"[PARAGRAPH]\\n{p}" for p in paragraphs)}
 """
 
     try:
