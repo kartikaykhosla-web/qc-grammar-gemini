@@ -51,7 +51,7 @@ REGION = "us-central1"
 CRED_PATH = "/tmp/gcp_service_account.json"
 
 def load_gcp_credentials():
-    raw = os.environ.get("GCP_SERVICE_ACCOUNT_JSON")
+    raw = st.secrets["GCP_SERVICE_ACCOUNT_JSON"]
     if not raw:
         st.error("❌ GCP_SERVICE_ACCOUNT_JSON not set")
         st.stop()
