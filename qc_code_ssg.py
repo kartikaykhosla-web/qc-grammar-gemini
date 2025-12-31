@@ -9,7 +9,6 @@ import re
 import os
 import requests
 import tempfile
-import atexit
 import streamlit as st
 from bs4 import BeautifulSoup
 
@@ -42,25 +41,29 @@ st.caption("Spelling · Grammar · Editorial Safety · AI Review")
 
 
 # =================================================
-# 🔑 VERTEX AI AUTH
+# 🔑 VERTEX AI AUTH (SAFE FOR STREAMLIT CLOUD)
 # =================================================
 if "GCP_SERVICE_ACCOUNT_JSON" not in os.environ:
     st.error("❌ GCP_SERVICE_ACCOUNT_JSON not set")
     st.stop()
 
-with tempfile.NamedTemporaryFile(delete=False, suffix=".json") as f:
-    f.write(os.environ["GCP_SERVICE_ACCOUNT_JSON"].encode("utf-8"))
-    SERVICE_ACCOUNT_PATH = f.name
-
-os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = SERVICE_ACCOUNT_PATH
-atexit.register(lambda: os.remove(SERVICE_ACCOUNT_PATH))
+if "GOOGLE_APPLICATION_CREDENTIALS" not in os.environ:
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".json") as f:
+        f.write(os.environ["GCP_SERVICE_ACCOUNT_JSON"].encode("utf-8"))
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = f.name
 
 PROJECT_ID = "prod-project-jnm-smart-cms"
 REGION = "us-central1"
 
-vertexai.init(project=PROJECT_ID, location=REGION)
+
+@st.cache_resource
+def init_vertex():
+    vertexai.init(project=PROJECT_ID, location=REGION)
+    return True
+
 
 try:
+    init_vertex()
     gemini_model = GenerativeModel("publishers/google/models/gemini-2.5-pro")
     st.success("✅ Gemini 2.5 Pro loaded")
 except Exception:
@@ -69,7 +72,7 @@ except Exception:
 
 
 # =================================================
-# INPUT EXTRACTION (FIXED)
+# INPUT EXTRACTION
 # =================================================
 def clean_docx(file_path):
     doc = Document(file_path)
@@ -109,8 +112,7 @@ def clean_article(url):
         if not txt or len(txt) < 15:
             continue
 
-        lowered = txt.lower()
-        if any(j in lowered for j in [
+        if any(j in txt.lower() for j in [
             "also read",
             "click here",
             "disclaimer:",
@@ -132,15 +134,17 @@ def clean_article(url):
 # LOAD MODELS
 # =================================================
 @st.cache_resource
-@st.cache_resource
 def load_nlp():
     return spacy.load("en_core_web_sm")
 
+
 @st.cache_resource
 def load_languagetool():
-    tool = language_tool_python.LanguageTool("en-US")
-    atexit.register(lambda: tool.close())
-    return tool
+    try:
+        return language_tool_python.LanguageToolPublicAPI("en-US")
+    except Exception:
+        return None
+
 
 @st.cache_resource
 def load_symspell():
@@ -150,6 +154,7 @@ def load_symspell():
     )
     sym.load_dictionary(dictionary_path, 0, 1)
     return sym
+
 
 nlp = load_nlp()
 lt_tool = load_languagetool()
@@ -163,33 +168,24 @@ spell = SpellChecker()
 def extract_named_entities(text):
     return {ent.text for ent in nlp(text).ents}
 
+
 def extract_numbers(text):
     return re.findall(r"\d[\d.,]*", text)
+
 
 def semantic_safe(a, b, t=0.92):
     from difflib import SequenceMatcher
     return SequenceMatcher(None, a, b).ratio() >= t
 
 
-def gemini_safe_merge(original, corrected):
-    if extract_numbers(original) != extract_numbers(corrected):
-        return original
-    if not extract_named_entities(original).issubset(
-        extract_named_entities(corrected)
-    ):
-        return original
-    if not semantic_safe(original, corrected):
-        return original
-    return corrected
-
-
 # =================================================
-# SPELLING + GRAMMAR (UNCHANGED)
+# SPELLING + GRAMMAR
 # =================================================
 STOPWORDS = {
     "a","an","the","of","to","in","on","at","for","from","by",
     "and","or","but","so","are","is","was","were","be","been","being"
 }
+
 
 def correct_spelling_minimal(text):
     tokens = text.split()
@@ -219,6 +215,9 @@ def correct_spelling_minimal(text):
 
 
 def correct_grammar_languagetool(text):
+    if not lt_tool:
+        return text
+
     corrected = language_tool_python.utils.correct(
         text, lt_tool.check(text)
     )
@@ -234,16 +233,16 @@ def correct_grammar_languagetool(text):
 
 
 # =================================================
-# GEMINI QC — OLD TABLE FORMAT (SAFE)
+# GEMINI QC — OLD TABLE FORMAT
 # =================================================
 def gemini_grammar_review(article_data):
+    init_vertex()
+
     paragraphs = [
         text[:900]
         for ctype, text in article_data
         if ctype == "paragraph"
     ]
-
-    joined_paragraphs = "\n\n".join(paragraphs)
 
     prompt = f"""
 You are a professional proofreader.
@@ -259,23 +258,10 @@ Return output strictly as a table:
 | Original | Corrected | Reason |
 
 TEXT:
-{joined_paragraphs}
+{chr(10).join(paragraphs)}
 """
 
-    response = gemini_model.generate_content(prompt)
-
-    try:
-        raw = response.text
-    except Exception:
-        raw = response.candidates[0].content.parts[0].text
-
-    # ---------- SAFETY PASS ----------
-    safe_rows = []
-    for para in paragraphs:
-        if para in raw:
-            safe_rows.append(para)
-
-    return raw
+    return gemini_model.generate_content(prompt).text
 
 
 # =================================================
@@ -296,7 +282,7 @@ def run_pipeline(content):
 
 
 # =================================================
-# STREAMLIT UI (OLD FORMAT)
+# STREAMLIT UI
 # =================================================
 st.sidebar.header("Input")
 source = st.sidebar.radio("Source", ["URL", "DOCX"])
