@@ -256,7 +256,7 @@ def gemini_grammar_review(article_data):
         if ctype == "paragraph"
     ]
 
-   prompt = f"""
+    prompt = f"""
 You are a professional proofreader.
 
 Rules (STRICT):
@@ -289,6 +289,7 @@ TEXT:
         return model.generate_content(prompt).text
     except Exception as e:
         return f"⚠️ Gemini unavailable:\n\n{e}"
+
 
 # =================================================
 # PIPELINE
