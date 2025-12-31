@@ -43,19 +43,11 @@ st.caption("Spelling · Grammar · Editorial Safety · AI Review")
 
 
 # =================================================
-# 🔑 VERTEX AI AUTH (SAFE FOR STREAMLIT CLOUD)
+# 🔑 VERTEX AI AUTH (STREAMLIT SAFE)
 # =================================================
 if "GCP_SERVICE_ACCOUNT_JSON" not in os.environ:
     st.error("❌ GCP_SERVICE_ACCOUNT_JSON not set")
     st.stop()
-
-CREDENTIALS_PATH = "/tmp/gcp_service_account.json"
-
-if not os.path.exists(CREDENTIALS_PATH):
-    with open(CREDENTIALS_PATH, "w") as f:
-        f.write(os.environ["GCP_SERVICE_ACCOUNT_JSON"])
-
-os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = CREDENTIALS_PATH
 
 PROJECT_ID = "prod-project-jnm-smart-cms"
 REGION = "us-central1"
@@ -72,16 +64,18 @@ def init_vertex():
         location=REGION,
         credentials=creds
     )
-
     return True
 
-try:
+
+@st.cache_resource
+def get_gemini_model():
     init_vertex()
-    gemini_model = GenerativeModel("publishers/google/models/gemini-2.5-pro")
-    st.success("✅ Gemini 2.5 Pro loaded")
-except Exception:
-    gemini_model = GenerativeModel("publishers/google/models/gemini-2.5-flash")
-    st.warning("⚠️ Falling back to Gemini 2.5 Flash")
+    try:
+        st.success("✅ Gemini 2.5 Pro loaded")
+        return GenerativeModel("publishers/google/models/gemini-2.5-pro")
+    except Exception:
+        st.warning("⚠️ Falling back to Gemini 2.5 Flash")
+        return GenerativeModel("publishers/google/models/gemini-2.5-flash")
 
 
 # =================================================
@@ -249,7 +243,7 @@ def correct_grammar_languagetool(text):
 # GEMINI QC — OLD TABLE FORMAT
 # =================================================
 def gemini_grammar_review(article_data):
-    init_vertex()
+    model = get_gemini_model()
 
     paragraphs = [
         text[:900]
@@ -274,7 +268,7 @@ TEXT:
 {chr(10).join(paragraphs)}
 """
 
-    return gemini_model.generate_content(prompt).text
+    return model.generate_content(prompt).text
 
 
 # =================================================
