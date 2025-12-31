@@ -8,6 +8,7 @@ OLD FORMAT RESTORED + EDITORIAL SAFETY FIXES
 import re
 import os
 import json
+import base64
 import requests
 import tempfile
 import streamlit as st
@@ -44,24 +45,25 @@ st.caption("Spelling · Grammar · Editorial Safety · AI Review")
 
 
 # =================================================
-# 🔑 VERTEX AI AUTH (HARDENED)
+# 🔑 VERTEX AI AUTH (BASE64 SAFE)
 # =================================================
 PROJECT_ID = "prod-project-jnm-smart-cms"
 REGION = "us-central1"
 CRED_PATH = "/tmp/gcp_service_account.json"
 
+
 def load_gcp_credentials():
-    raw = st.secrets["GCP_SERVICE_ACCOUNT_JSON"]
-    if not raw:
-        st.error("❌ GCP_SERVICE_ACCOUNT_JSON not set")
+    if "GCP_SERVICE_ACCOUNT_JSON_B64" not in st.secrets:
+        st.error("❌ GCP_SERVICE_ACCOUNT_JSON_B64 not set in Streamlit secrets")
         st.stop()
 
     try:
-        # Handle escaped newlines
-        raw = raw.replace("\\n", "\n")
-        creds_dict = json.loads(raw)
+        decoded = base64.b64decode(
+            st.secrets["GCP_SERVICE_ACCOUNT_JSON_B64"]
+        ).decode("utf-8")
+        creds_dict = json.loads(decoded)
     except Exception as e:
-        st.error("❌ Invalid GCP_SERVICE_ACCOUNT_JSON format")
+        st.error("❌ Invalid Base64 GCP credential")
         st.exception(e)
         st.stop()
 
@@ -75,6 +77,7 @@ def load_gcp_credentials():
 @st.cache_resource
 def init_vertex_and_model():
     creds = load_gcp_credentials()
+
     vertexai.init(
         project=PROJECT_ID,
         location=REGION,
@@ -234,7 +237,7 @@ def correct_grammar_languagetool(text):
     try:
         return language_tool_python.utils.correct(text, lt_tool.check(text))
     except RateLimitError:
-        return text  # FAIL OPEN — do not crash app
+        return text
     except Exception:
         return text
 
