@@ -129,16 +129,21 @@ def clean_article(url):
         content.append(("heading", title.get_text(strip=True)))
 
     for el in article.find_all(["p", "li"], recursive=True):
-        # Extract text exactly as rendered, preserving spaces & punctuation
+        # ✅ IMPORTANT:
+        # - separator=" " preserves word boundaries across hyperlinks
+        # - strip=False preserves punctuation exactly as rendered
         txt = el.get_text(separator=" ", strip=False)
 
-        # Normalize only excessive whitespace (NOT punctuation)
-        txt = re.sub(r"[ \t]+", " ", txt).strip()
-    
+        # ✅ Normalize ONLY excessive whitespace introduced by HTML
+        # ❌ Do NOT touch punctuation, dots, abbreviations, or spacing around them
+        txt = re.sub(r"[ \t]+", " ", txt)
+        txt = txt.strip()
+
         if not txt or len(txt) < 15:
             continue
-    
-        if any(j in txt.lower() for j in [
+
+        lowered = txt.lower()
+        if any(j in lowered for j in [
             "also read",
             "click here",
             "disclaimer:",
@@ -146,14 +151,15 @@ def clean_article(url):
             "to read more articles"
         ]):
             continue
-    
+
         if txt in seen:
             continue
 
-    content.append(("paragraph", txt))
-    seen.add(txt)
+        content.append(("paragraph", txt))
+        seen.add(txt)
 
     return content
+
 
 # =================================================
 # LOAD MODELS
