@@ -129,6 +129,11 @@ def clean_article(url):
         content.append(("heading", title.get_text(strip=True)))
 
     for el in article.find_all(["p", "li"], recursive=True):
+    # Extract text exactly as rendered, preserving spaces & punctuation
+    txt = el.get_text(separator=" ", strip=False)
+
+    # Normalize only excessive whitespace (NOT punctuation)
+    txt = re.sub(r"[ \t]+", " ", txt).strip()
 
         # 🔧 FIX: preserve spaces around inline elements (anchors, spans, etc.)
         for tag in el.find_all(["a", "span", "strong", "em", "b", "i"]):
