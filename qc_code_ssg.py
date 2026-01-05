@@ -42,7 +42,7 @@ from vertexai.generative_models import GenerativeModel
 st.set_page_config(page_title="Article QC Tool (Gemini 2.5)", layout="wide")
 st.title("🧪 Article QC Tool (Gemini 2.5 – Vertex AI)")
 st.caption("Spelling · Grammar · Editorial Safety · AI Review")
-
+st.info("ℹ️ If the app was inactive, it may take 10–30 seconds to wake up. Please wait.")
 
 # =================================================
 # 🔑 VERTEX AI AUTH (BASE64 SAFE)
