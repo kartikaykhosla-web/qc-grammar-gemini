@@ -391,4 +391,7 @@ if article_content:
 
     with col2:
         st.subheader("🤖 Gemini QC Review")
-        st.markdown(gemini_grammar_review(qc_content))
+        st.markdown(
+    gemini_grammar_review(qc_content).replace(" | | ", "\n| "),
+)
+
