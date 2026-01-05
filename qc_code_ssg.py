@@ -130,17 +130,12 @@ def clean_article(url):
 
     for el in article.find_all(["p", "li"], recursive=True):
 
-        # 🔒 INLINE TAG NORMALIZATION (CRITICAL FIX)
-        for tag in el.find_all(["a", "span", "strong", "em"]):
-            tag.unwrap()
+        # 🔧 FIX: preserve spaces around inline elements (anchors, spans, etc.)
+        for tag in el.find_all(["a", "span", "strong", "em", "b", "i"]):
+            tag.insert_before(" ")
+            tag.insert_after(" ")
 
-        # Preserve spacing around inline elements (a, span, strong, etc.)
-for tag in el.find_all(["a", "span", "strong", "em", "b", "i"]):
-    tag.insert_before(" ")
-    tag.insert_after(" ")
-
-txt = " ".join(el.stripped_strings)
-
+        txt = " ".join(el.stripped_strings)
 
         if not txt or len(txt) < 15:
             continue
@@ -161,7 +156,6 @@ txt = " ".join(el.stripped_strings)
         seen.add(txt)
 
     return content
-
 
 # =================================================
 # LOAD MODELS
