@@ -109,7 +109,6 @@ def clean_docx(file_path):
 
     return content
 
-
 def clean_article(url):
     headers = {"User-Agent": "Mozilla/5.0"}
     response = requests.get(url, headers=headers, timeout=15)
@@ -129,13 +128,10 @@ def clean_article(url):
         content.append(("heading", title.get_text(strip=True)))
 
     for el in article.find_all(["p", "li"], recursive=True):
-        # ✅ IMPORTANT:
-        # - separator=" " preserves word boundaries across hyperlinks
-        # - strip=False preserves punctuation exactly as rendered
+        # Preserve spacing across inline tags (anchors, spans, etc.)
         txt = el.get_text(separator=" ", strip=False)
 
-        # ✅ Normalize ONLY excessive whitespace introduced by HTML
-        # ❌ Do NOT touch punctuation, dots, abbreviations, or spacing around them
+        # Normalize ONLY excessive whitespace introduced by HTML
         txt = re.sub(r"[ \t]+", " ", txt)
         txt = txt.strip()
 
@@ -159,7 +155,6 @@ def clean_article(url):
         seen.add(txt)
 
     return content
-
 
 # =================================================
 # LOAD MODELS
