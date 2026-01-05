@@ -390,10 +390,11 @@ if article_content:
             st.write(t)
 
     with col2:
-    st.subheader("🤖 Gemini QC Review")
-    st.markdown(
-        gemini_grammar_review(qc_content),
-        unsafe_allow_html=False
-    )
+        st.subheader("🤖 Gemini QC Review")
+        st.markdown(
+            gemini_grammar_review(qc_content),
+            unsafe_allow_html=False
+        )
+
 
 
