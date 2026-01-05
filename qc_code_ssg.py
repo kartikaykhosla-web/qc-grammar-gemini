@@ -116,6 +116,12 @@ def clean_article(url):
 
     soup = BeautifulSoup(response.text, "html.parser")
 
+    # 🔴 REMOVE ACCESSIBILITY / HIDDEN TEXT NODES (CRITICAL)
+    for hidden in soup.select(
+        '[aria-hidden="true"], .sr-only, .visually-hidden, .screen-reader-text'
+    ):
+        hidden.decompose()
+
     article = (
         soup.find("article")
         or soup.find("div", class_=lambda c: c and "article" in c.lower())
@@ -125,24 +131,16 @@ def clean_article(url):
     content = []
     seen = set()
 
-    # ---- Title (unchanged behaviour, but safe extraction) ----
+    # ---- Title ----
     title = soup.find("h1")
     if title:
-        title_text = title.get_text(separator="", strip=False)
-        title_text = re.sub(r"\s+", " ", title_text).strip()
+        title_text = title.get_text(separator="", strip=True)
         if title_text:
             content.append(("heading", title_text))
 
-    # ---- Paragraph extraction (CRITICAL FIX) ----
+    # ---- Paragraphs ----
     for el in article.find_all(["p", "li"], recursive=True):
-
-        # IMPORTANT:
-        # - separator="" preserves character adjacency
-        # - strip=False preserves punctuation and abbreviations
-        txt = el.get_text(separator="", strip=False)
-
-        # Minimal cleanup ONLY (do NOT normalize punctuation)
-        txt = re.sub(r"\s+", " ", txt).strip()
+        txt = el.get_text(separator="", strip=True)
 
         if not txt or len(txt) < 15:
             continue
