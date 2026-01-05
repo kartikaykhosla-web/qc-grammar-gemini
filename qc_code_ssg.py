@@ -349,7 +349,41 @@ TEXT:
         return filter_gemini_rows(raw, article_blob)
     except Exception as e:
         return f"⚠️ Gemini unavailable:\n\n{e}"
+# =================================================
+# FACT CHECK — SECOND PASS (ADDED, ISOLATED)
+# =================================================
+def gemini_fact_check(article_data):
+    model = init_vertex_and_model()
 
+    paragraphs = [
+        text
+        for ctype, text in article_data
+        if ctype == "paragraph"
+    ]
+
+    fact_prompt = f"""
+You are a strict factual verifier.
+
+Rules (STRICT):
+- ONLY check factual correctness
+- Identify statements that are factually incorrect or misleading
+- Do NOT check grammar, spelling, punctuation, or style
+- Do NOT rewrite sentences
+- Do NOT infer intent
+- If a statement is unverifiable, mark it as "Unverifiable"
+- If a statement is factually correct, DO NOT include it
+
+Return output strictly as a table:
+| Statement | Issue | Correct Fact |
+
+TEXT:
+{chr(10).join(paragraphs)}
+"""
+
+    try:
+        return model.generate_content(fact_prompt).text
+    except Exception as e:
+        return f"⚠️ Fact check unavailable:\n\n{e}"
 
 # =================================================
 # PIPELINE
@@ -403,6 +437,12 @@ if article_content:
             gemini_grammar_review(qc_content),
             unsafe_allow_html=False
         )
+            st.divider()
+
+    if st.button("🔍 Run Fact Check (Second Pass)"):
+        st.subheader("📌 Fact Check Results")
+        st.markdown(gemini_fact_check(qc_content))
+
 
 
 
