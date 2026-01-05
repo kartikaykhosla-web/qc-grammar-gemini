@@ -129,26 +129,26 @@ def clean_article(url):
         content.append(("heading", title.get_text(strip=True)))
 
     for el in article.find_all(["p", "li"], recursive=True):
-    # Extract text exactly as rendered, preserving spaces & punctuation
-    txt = el.get_text(separator=" ", strip=False)
+        # Extract text exactly as rendered, preserving spaces & punctuation
+        txt = el.get_text(separator=" ", strip=False)
 
-    # Normalize only excessive whitespace (NOT punctuation)
-    txt = re.sub(r"[ \t]+", " ", txt).strip()
-
-    if not txt or len(txt) < 15:
-        continue
-
-    if any(j in txt.lower() for j in [
-        "also read",
-        "click here",
-        "disclaimer:",
-        "follow us",
-        "to read more articles"
-    ]):
-        continue
-
-    if txt in seen:
-        continue
+        # Normalize only excessive whitespace (NOT punctuation)
+        txt = re.sub(r"[ \t]+", " ", txt).strip()
+    
+        if not txt or len(txt) < 15:
+            continue
+    
+        if any(j in txt.lower() for j in [
+            "also read",
+            "click here",
+            "disclaimer:",
+            "follow us",
+            "to read more articles"
+        ]):
+            continue
+    
+        if txt in seen:
+            continue
 
     content.append(("paragraph", txt))
     seen.add(txt)
