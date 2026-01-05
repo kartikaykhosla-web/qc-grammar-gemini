@@ -329,21 +329,8 @@ ABBREVIATION SAFETY:
 - Do NOT suggest corrections involving "in an X post", "on X", or similar phrases
 - If the platform name is a single letter, it is intentional and correct
 
-OUTPUT FORMAT (MANDATORY):
-
-You MUST return a valid GitHub-flavored Markdown table.
-
-- The FIRST line MUST be exactly:
+Return output strictly as a table:
 | Original | Corrected | Reason |
-
-- The SECOND line MUST be exactly:
-|---|---|---|
-
-- EVERY correction MUST be on its OWN ROW
-- DO NOT combine multiple corrections in one row
-- DO NOT place multiple rows on a single line
-- DO NOT add any text before or after the table
-- If there are zero corrections, return ONLY the header and separator
 
 TEXT:
 {chr(10).join(f"[PARAGRAPH]\\n{p}" for p in paragraphs)}
