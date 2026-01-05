@@ -113,49 +113,55 @@ def clean_article(url):
     headers = {"User-Agent": "Mozilla/5.0"}
     response = requests.get(url, headers=headers, timeout=15)
     response.raise_for_status()
+
     soup = BeautifulSoup(response.text, "html.parser")
 
     article = (
         soup.find("article")
-        or soup.find("div", class_=lambda c: c and "article" in c)
+        or soup.find("div", class_=lambda c: c and "article" in c.lower())
         or soup
     )
 
-    content, seen = [], set()
+    content = []
+    seen = set()
 
+    # ---- Title (unchanged behaviour, but safe extraction) ----
     title = soup.find("h1")
     if title:
-        content.append(("heading", title.get_text(strip=True)))
+        title_text = title.get_text(separator="", strip=False)
+        title_text = re.sub(r"\s+", " ", title_text).strip()
+        if title_text:
+            content.append(("heading", title_text))
 
+    # ---- Paragraph extraction (CRITICAL FIX) ----
     for el in article.find_all(["p", "li"], recursive=True):
-        txt = el.get_text(separator=" ", strip=False)
 
-        # Normalize only excessive whitespace
-        txt = re.sub(r"[ \t]+", " ", txt)
+        # IMPORTANT:
+        # - separator="" preserves character adjacency
+        # - strip=False preserves punctuation and abbreviations
+        txt = el.get_text(separator="", strip=False)
 
-        # ✅ FIX: remove anchor-induced space before comma
-        txt = re.sub(r"\s+,", ",", txt)
-
-        txt = txt.strip()
+        # Minimal cleanup ONLY (do NOT normalize punctuation)
+        txt = re.sub(r"\s+", " ", txt).strip()
 
         if not txt or len(txt) < 15:
             continue
 
-        lowered = txt.lower()
-        if any(j in lowered for j in [
+        lower_txt = txt.lower()
+        if any(j in lower_txt for j in [
             "also read",
             "click here",
-            "disclaimer:",
+            "disclaimer",
             "follow us",
-            "to read more articles"
+            "to read more articles",
         ]):
             continue
 
         if txt in seen:
             continue
 
-        content.append(("paragraph", txt))
         seen.add(txt)
+        content.append(("paragraph", txt))
 
     return content
 
