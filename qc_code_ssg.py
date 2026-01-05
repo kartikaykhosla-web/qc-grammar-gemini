@@ -135,31 +135,23 @@ def clean_article(url):
     # Normalize only excessive whitespace (NOT punctuation)
     txt = re.sub(r"[ \t]+", " ", txt).strip()
 
-        # 🔧 FIX: preserve spaces around inline elements (anchors, spans, etc.)
-        for tag in el.find_all(["a", "span", "strong", "em", "b", "i"]):
-            tag.insert_before(" ")
-            tag.insert_after(" ")
+    if not txt or len(txt) < 15:
+        continue
 
-        txt = " ".join(el.stripped_strings)
-        txt = re.sub(r"\s+([.,!?;:])", r"\1", txt)
+    if any(j in txt.lower() for j in [
+        "also read",
+        "click here",
+        "disclaimer:",
+        "follow us",
+        "to read more articles"
+    ]):
+        continue
 
-        if not txt or len(txt) < 15:
-            continue
+    if txt in seen:
+        continue
 
-        if any(j in txt.lower() for j in [
-            "also read",
-            "click here",
-            "disclaimer:",
-            "follow us",
-            "to read more articles"
-        ]):
-            continue
-
-        if txt in seen:
-            continue
-
-        content.append(("paragraph", txt))
-        seen.add(txt)
+    content.append(("paragraph", txt))
+    seen.add(txt)
 
     return content
 
