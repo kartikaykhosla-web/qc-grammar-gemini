@@ -267,15 +267,18 @@ Rules (STRICT):
 - Do NOT change numbers
 - NEVER change proper nouns, political parties, or person names
 - NEVER rename quoted speakers
+- NEVER modify social media platform names or product/platform identifiers
+  (e.g., X, Twitter, Facebook, Instagram)
+- NEVER modify single-letter proper nouns (e.g., X)
 - If the text is not a complete sentence, do NOT suggest a correction
 - If unsure, return the Original unchanged
-- Do NOT normalize legal or political references
-- You MAY correct possessive plurality errors if the correction does not change meaning
+- Do NOT normalize legal, political, or platform references
 
 CRITICAL CONSTRAINTS:
 - You may ONLY use text that appears verbatim in the TEXT section
 - NEVER invent new examples, phrases, or sentences
-- The "Original" column MUST be an exact, character-for-character substring of the provided TEXT
+- The "Original" column MUST be an exact, character-for-character substring
+  of the provided TEXT
 - If no correction is required, DO NOT create a table row
 - If you cannot find an exact match in the TEXT, do NOT include it
 
