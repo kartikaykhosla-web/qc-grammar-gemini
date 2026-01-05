@@ -128,7 +128,7 @@ def clean_article(url):
         content.append(("heading", title.get_text(strip=True)))
 
     for el in article.find_all(["p", "li"], recursive=True):
-        txt = el.get_text(" ", strip=True)
+        txt = el.get_text(separator="", strip=True)
 
         if not txt or len(txt) < 15:
             continue
@@ -281,6 +281,18 @@ CRITICAL CONSTRAINTS:
   of the provided TEXT
 - If no correction is required, DO NOT create a table row
 - If you cannot find an exact match in the TEXT, do NOT include it
+
+ABSOLUTE RULE:
+- Treat the TEXT as a raw byte string
+- Do NOT normalize whitespace, punctuation, or casing
+- Periods, commas, apostrophes, and abbreviations must be preserved exactly
+- Each paragraph is independent.
+- Do NOT use knowledge from previous or following paragraphs.
+
+
+ABBREVIATION SAFETY:
+- Single-letter abbreviations followed by a period (e.g., "S.", "X.", "U.") are VALID
+- Do NOT expand, replace, or reinterpret them
 
 Return output strictly as a table:
 | Original | Corrected | Reason |
