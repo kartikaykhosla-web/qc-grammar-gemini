@@ -240,31 +240,33 @@ def correct_grammar_languagetool(text):
 # =================================================
 # 🔍 VERBATIM DIFF VALIDATOR + CONFIDENCE SCORE
 # =================================================
-def confidence_score(a, b):
-    return round(SequenceMatcher(None, a, b).ratio(), 3)
-
-
 def filter_gemini_rows(raw_table, article_text):
     lines = raw_table.splitlines()
-    safe_rows = []
+    output = []
+
+    header_added = False
+
     for line in lines:
-        if "|" not in line or "Original" in line:
-            safe_rows.append(line)
+        if line.strip().startswith("| Original"):
+            output.append("| Original | Corrected | Reason |")
+            output.append("|---|---|---|")
+            header_added = True
+            continue
+
+        if "|" not in line:
             continue
 
         cols = [c.strip() for c in line.split("|") if c.strip()]
-        if len(cols) < 3:
+        if len(cols) != 3:
             continue
 
-        original = cols[0]
-        corrected = cols[1]
+        original, corrected, reason = cols
 
+        # Verbatim safety: original must exist exactly in article text
         if original in article_text:
-            score = confidence_score(original, corrected)
-            safe_rows.append(f"| {original} | {corrected} | {cols[2]} | {score} |")
+            output.append(f"| {original} | {corrected} | {reason} |")
 
-    return "\n".join(safe_rows)
-
+    return "\n".join(output) if header_added else ""
 
 # =================================================
 # GEMINI QC — OLD TABLE FORMAT (SAFE)
@@ -290,6 +292,8 @@ Rules (STRICT):
 - Only fix spelling and grammar
 - Do NOT infer facts or speakers
 - Do NOT change numbers
+- British English is the ONLY accepted standard
+- Convert American English spellings to British English where applicable
 - NEVER change proper nouns, political parties, or person names
 - NEVER rename quoted speakers
 - NEVER modify social media platform names or product/platform identifiers
@@ -298,6 +302,8 @@ Rules (STRICT):
 - If the text is not a complete sentence, do NOT suggest a correction
 - If unsure, return the Original unchanged
 - Do NOT normalize legal, political, or platform references
+- Perform a fact check for publically available verified information and do not make any assumptions or presumptions.
+- If unsure about facts, don't change it
 
 CRITICAL CONSTRAINTS:
 - You may ONLY use text that appears verbatim in the TEXT section
