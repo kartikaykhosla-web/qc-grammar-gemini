@@ -136,6 +136,7 @@ def clean_article(url):
             tag.insert_after(" ")
 
         txt = " ".join(el.stripped_strings)
+        txt = re.sub(r"\s+([.,!?;:])", r"\1", txt)
 
         if not txt or len(txt) < 15:
             continue
