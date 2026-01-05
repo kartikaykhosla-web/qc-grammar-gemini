@@ -14,6 +14,7 @@ import tempfile
 import streamlit as st
 from bs4 import BeautifulSoup
 from google.oauth2 import service_account
+from difflib import SequenceMatcher
 
 # ===================== NLP =====================
 import spacy
@@ -42,7 +43,7 @@ from vertexai.generative_models import GenerativeModel
 st.set_page_config(page_title="Article QC Tool (Gemini 2.5)", layout="wide")
 st.title("🧪 Article QC Tool (Gemini 2.5 – Vertex AI)")
 st.caption("Spelling · Grammar · Editorial Safety · AI Review")
-st.info("ℹ️ If the app was inactive, it may take 10–30 seconds to wake up. Please wait.")
+
 
 # =================================================
 # 🔑 VERTEX AI AUTH (BASE64 SAFE)
@@ -93,7 +94,7 @@ def init_vertex_and_model():
 
 
 # =================================================
-# INPUT EXTRACTION
+# INPUT EXTRACTION (INLINE-SAFE)
 # =================================================
 def clean_docx(file_path):
     doc = Document(file_path)
@@ -128,7 +129,12 @@ def clean_article(url):
         content.append(("heading", title.get_text(strip=True)))
 
     for el in article.find_all(["p", "li"], recursive=True):
-        txt = el.get_text(separator="", strip=True)
+
+        # 🔒 INLINE TAG NORMALIZATION (CRITICAL FIX)
+        for tag in el.find_all(["a", "span", "strong", "em"]):
+            tag.unwrap()
+
+        txt = el.get_text(strip=True)
 
         if not txt or len(txt) < 15:
             continue
@@ -184,17 +190,6 @@ spell = SpellChecker()
 
 
 # =================================================
-# SAFETY HELPERS
-# =================================================
-def extract_named_entities(text):
-    return {ent.text for ent in nlp(text).ents}
-
-
-def extract_numbers(text):
-    return re.findall(r"\d[\d.,]*", text)
-
-
-# =================================================
 # SPELLING + GRAMMAR
 # =================================================
 STOPWORDS = {
@@ -207,7 +202,7 @@ def correct_spelling_minimal(text):
     tokens = text.split()
     out = []
 
-    entities = extract_named_entities(text)
+    entities = {ent.text for ent in nlp(text).ents}
     entity_tokens = {w for e in entities for w in e.split()}
 
     for tok in tokens:
@@ -243,18 +238,48 @@ def correct_grammar_languagetool(text):
 
 
 # =================================================
-# GEMINI QC — OLD TABLE FORMAT
+# 🔍 VERBATIM DIFF VALIDATOR + CONFIDENCE SCORE
+# =================================================
+def confidence_score(a, b):
+    return round(SequenceMatcher(None, a, b).ratio(), 3)
+
+
+def filter_gemini_rows(raw_table, article_text):
+    lines = raw_table.splitlines()
+    safe_rows = []
+    for line in lines:
+        if "|" not in line or "Original" in line:
+            safe_rows.append(line)
+            continue
+
+        cols = [c.strip() for c in line.split("|") if c.strip()]
+        if len(cols) < 3:
+            continue
+
+        original = cols[0]
+        corrected = cols[1]
+
+        if original in article_text:
+            score = confidence_score(original, corrected)
+            safe_rows.append(f"| {original} | {corrected} | {cols[2]} | {score} |")
+
+    return "\n".join(safe_rows)
+
+
+# =================================================
+# GEMINI QC — OLD TABLE FORMAT (SAFE)
 # =================================================
 def gemini_grammar_review(article_data):
     model = init_vertex_and_model()
 
-    MAX_PARA_CHARS = 1800  # safe upper bound for Gemini Pro
-
+    MAX_PARA_CHARS = 1800
     paragraphs = [
         text if len(text) <= MAX_PARA_CHARS else text[:MAX_PARA_CHARS]
         for ctype, text in article_data
         if ctype == "paragraph"
     ]
+
+    article_blob = "\n".join(paragraphs)
 
     prompt = f"""
 You are a professional proofreader.
@@ -289,10 +314,20 @@ ABSOLUTE RULE:
 - Each paragraph is independent.
 - Do NOT use knowledge from previous or following paragraphs.
 
-
 ABBREVIATION SAFETY:
 - Single-letter abbreviations followed by a period (e.g., "S.", "X.", "U.") are VALID
 - Do NOT expand, replace, or reinterpret them
+
+⬅ ADDED — INLINE CONTENT SAFETY:
+- Hyperlinks, anchor text, or inline formatting may exist in the source
+- Treat all input as already-rendered plain text
+- Do NOT assume missing or extra spaces around punctuation
+- Do NOT infer spacing changes caused by links or HTML tags
+
+⬅ ADDED — PLATFORM NAME SAFETY:
+- The social media platform "X" must NEVER be interpreted as "A"
+- Do NOT suggest corrections involving "in an X post", "on X", or similar phrases
+- If the platform name is a single letter, it is intentional and correct
 
 Return output strictly as a table:
 | Original | Corrected | Reason |
@@ -302,7 +337,8 @@ TEXT:
 """
 
     try:
-        return model.generate_content(prompt).text
+        raw = model.generate_content(prompt).text
+        return filter_gemini_rows(raw, article_blob)
     except Exception as e:
         return f"⚠️ Gemini unavailable:\n\n{e}"
 
