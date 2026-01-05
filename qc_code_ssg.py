@@ -432,16 +432,14 @@ if article_content:
             st.write(t)
 
     with col2:
-    st.subheader("🤖 Gemini QC Review")
-    st.markdown(gemini_grammar_review(qc_content))
+        st.subheader("🤖 Gemini QC Review")
+        st.markdown(gemini_grammar_review(qc_content))
 
     st.divider()
 
     if st.button("🔍 Run Fact Check (Second Pass)"):
         st.subheader("📌 Fact Check Results")
         st.markdown(gemini_fact_check(qc_content))
-
-
 
 
 
