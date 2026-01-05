@@ -128,11 +128,14 @@ def clean_article(url):
         content.append(("heading", title.get_text(strip=True)))
 
     for el in article.find_all(["p", "li"], recursive=True):
-        # Preserve spacing across inline tags (anchors, spans, etc.)
         txt = el.get_text(separator=" ", strip=False)
 
-        # Normalize ONLY excessive whitespace introduced by HTML
+        # Normalize only excessive whitespace
         txt = re.sub(r"[ \t]+", " ", txt)
+
+        # ✅ FIX: remove anchor-induced space before comma
+        txt = re.sub(r"\s+,", ",", txt)
+
         txt = txt.strip()
 
         if not txt or len(txt) < 15:
