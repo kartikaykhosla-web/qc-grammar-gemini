@@ -1,6 +1,7 @@
 streamlit
 requests
-beautifulsoup4
+beautifulsoup4>=4.9.0
+
 spacy
 python-docx
 language-tool-python
