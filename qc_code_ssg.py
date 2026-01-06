@@ -15,6 +15,8 @@ import streamlit as st
 from bs4 import BeautifulSoup
 from google.oauth2 import service_account
 from difflib import SequenceMatcher
+from playwright.sync_api import sync_playwright
+
 
 # ===================== NLP =====================
 import spacy
@@ -96,6 +98,30 @@ def init_vertex_and_model():
 # =================================================
 # INPUT EXTRACTION (INLINE-SAFE)
 # =================================================
+def fetch_rendered_html(url, timeout=15000):
+    """
+    Fetch fully rendered HTML using headless Chromium.
+    Used only for JS-heavy sites.
+    """
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage"]
+        )
+        page = browser.new_page()
+        page.goto(url, wait_until="networkidle", timeout=timeout)
+        html = page.content()
+        browser.close()
+    return html
+
+JS_HEAVY_DOMAINS = {
+    "herzindagi.com",
+}
+
+def needs_js_rendering(url: str) -> bool:
+    return any(domain in url for domain in JS_HEAVY_DOMAINS)
+
+
 def clean_docx(file_path):
     doc = Document(file_path)
     content, seen = [], set()
@@ -111,16 +137,18 @@ def clean_docx(file_path):
 
 def clean_article(url):
     headers = {"User-Agent": "Mozilla/5.0"}
-    response = requests.get(url, headers=headers, timeout=15)
-    response.raise_for_status()
 
-    soup = BeautifulSoup(response.text, "html.parser")
+    # ---- STEP 1: Fetch HTML (JS or non-JS) ----
+    if needs_js_rendering(url):
+        html = fetch_rendered_html(url)
+        source_type = "js"
+    else:
+        response = requests.get(url, headers=headers, timeout=15)
+        response.raise_for_status()
+        html = response.text
+        source_type = "static"
 
-    # 🔴 REMOVE ACCESSIBILITY / HIDDEN TEXT NODES (CRITICAL)
-    for hidden in soup.select(
-        '[aria-hidden="true"], .sr-only, .visually-hidden, .screen-reader-text'
-    ):
-        hidden.decompose()
+    soup = BeautifulSoup(html, "html.parser")
 
     article = (
         soup.find("article")
@@ -128,41 +156,48 @@ def clean_article(url):
         or soup
     )
 
-    content = []
-    seen = set()
+    content, seen = [], set()
 
-    # ---- Title ----
     title = soup.find("h1")
     if title:
-        title_text = title.get_text(separator="", strip=True)
-        if title_text:
-            content.append(("heading", title_text))
+        content.append(("heading", title.get_text(strip=True)))
 
-    # ---- Paragraphs ----
+    paragraphs_found = 0
+
     for el in article.find_all(["p", "li"], recursive=True):
-        txt = el.get_text(separator="", strip=True)
+        txt = el.get_text(separator=" ", strip=False)
+
+        # Normalize ONLY HTML artefacts (NOT punctuation)
+        txt = re.sub(r"\s+", " ", txt).strip()
 
         if not txt or len(txt) < 15:
             continue
 
-        lower_txt = txt.lower()
-        if any(j in lower_txt for j in [
+        if any(j in txt.lower() for j in [
             "also read",
             "click here",
-            "disclaimer",
+            "disclaimer:",
             "follow us",
-            "to read more articles",
+            "to read more articles"
         ]):
             continue
 
         if txt in seen:
             continue
 
-        seen.add(txt)
         content.append(("paragraph", txt))
+        seen.add(txt)
+        paragraphs_found += 1
+
+    # ---- STEP 2: Partial article detection ----
+    if source_type == "static" and paragraphs_found < 5:
+        st.warning(
+            "⚠️ Partial article detected. "
+            "This page likely loads content dynamically. "
+            "Switching to JS rendering is recommended."
+        )
 
     return content
-
 # =================================================
 # LOAD MODELS
 # =================================================
