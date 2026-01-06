@@ -15,7 +15,6 @@ import streamlit as st
 from bs4 import BeautifulSoup
 from google.oauth2 import service_account
 from difflib import SequenceMatcher
-from playwright.sync_api import sync_playwright
 
 
 # ===================== NLP =====================
@@ -98,30 +97,6 @@ def init_vertex_and_model():
 # =================================================
 # INPUT EXTRACTION (INLINE-SAFE)
 # =================================================
-def fetch_rendered_html(url, timeout=15000):
-    """
-    Fetch fully rendered HTML using headless Chromium.
-    Used only for JS-heavy sites.
-    """
-    with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=["--no-sandbox", "--disable-dev-shm-usage"]
-        )
-        page = browser.new_page()
-        page.goto(url, wait_until="networkidle", timeout=timeout)
-        html = page.content()
-        browser.close()
-    return html
-
-JS_HEAVY_DOMAINS = {
-    "herzindagi.com",
-}
-
-def needs_js_rendering(url: str) -> bool:
-    return any(domain in url for domain in JS_HEAVY_DOMAINS)
-
-
 def clean_docx(file_path):
     doc = Document(file_path)
     content, seen = [], set()
