@@ -498,13 +498,13 @@ if article_content:
             st.write(t)
 
     with col2:
-    st.subheader("🤖 Gemini QC Review")
+        st.subheader("🤖 Gemini QC Review")
 
-    raw = gemini_grammar_review(qc_content)
-    article_text = "\n".join(t for _, t in qc_content)
+        raw = gemini_grammar_review(qc_content)
+        article_text = "\n".join(t for _, t in qc_content)
 
-    clean = filter_invalid_rows(raw, article_text)
-    st.markdown(clean)
+        clean = filter_invalid_rows(raw, article_text)
+        st.markdown(clean)
 
     st.divider()
 
