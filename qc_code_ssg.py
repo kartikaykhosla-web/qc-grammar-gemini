@@ -377,7 +377,34 @@ Return output strictly as a table:
         except Exception:
             continue
 
-    return "\n".join(responses)
+    rows = []
+
+for resp in responses:
+    for line in resp.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+
+        # Skip headers & separators
+        if line.startswith("| Original"):
+            continue
+        if line.startswith("|---"):
+            continue
+
+        # Keep only valid table rows
+        if line.count("|") >= 3:
+            rows.append(line)
+
+if not rows:
+    return ""
+
+table = [
+    "| Original | Corrected | Reason |",
+    "|---|---|---|",
+    *rows
+]
+
+return "\n".join(table)
 
 
 # ============================
