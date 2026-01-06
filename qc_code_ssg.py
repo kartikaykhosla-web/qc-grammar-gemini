@@ -175,6 +175,28 @@ def clean_article(url):
         content.append(("paragraph", txt))
 
     return content
+
+def is_structural_line(text: str) -> bool:
+    t = text.strip()
+
+    # Very short fragments
+    if len(t.split()) <= 3:
+        return True
+
+    # Headings / labels (Title Case, no verb)
+    if t.istitle() and not any(v in t.lower() for v in ["is", "was", "are", "were", "has", "have"]):
+        return True
+
+    # List / section markers
+    if re.match(r"^(Day|India|Note|Story|About|Done|Weekend|Monday|Tuesday)\b", t):
+        return True
+
+    # No verb at all → not a sentence
+    if not re.search(r"\b(is|was|were|are|has|have|had|said|says)\b", t.lower()):
+        return True
+
+    return False
+
 # =================================================
 # LOAD MODELS
 # =================================================
@@ -404,9 +426,8 @@ def gemini_fact_check(article_data):
     model = init_vertex_and_model()
 
     paragraphs = [
-        text
-        for ctype, text in article_data
-        if ctype == "paragraph"
+    text for ctype, text in article_data
+    if ctype == "paragraph" and not is_structural_line(text)
     ]
 
     fact_prompt = f"""
