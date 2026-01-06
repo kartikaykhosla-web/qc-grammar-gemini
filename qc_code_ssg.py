@@ -381,8 +381,8 @@ Return output strictly as a table:
 
 
 # ============================
-Invalid rows
-#=============================
+# Invalid rows
+# ============================
 def filter_invalid_rows(gemini_md, article_text):
     lines = gemini_md.splitlines()
     out = []
