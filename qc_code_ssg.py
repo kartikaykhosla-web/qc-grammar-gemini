@@ -111,61 +111,70 @@ def clean_docx(file_path):
     return content
 
 def clean_article(url):
-    headers = {
-        "User-Agent": "Mozilla/5.0 (compatible; ArticleQC/1.0)"
-    }
-    response = requests.get(url, headers=headers, timeout=20)
+    headers = {"User-Agent": "Mozilla/5.0"}
+    response = requests.get(url, headers=headers, timeout=15)
     response.raise_for_status()
-
     soup = BeautifulSoup(response.text, "html.parser")
-
-    # 🔴 Remove non-content elements aggressively
-    for tag in soup([
-        "script", "style", "noscript", "iframe",
-        "aside", "footer", "nav", "form"
-    ]):
-        tag.decompose()
-
-    # 🔵 Identify article body
-    article = (
-        soup.find("article") or
-        soup.find("div", attrs={"itemprop": "articleBody"}) or
-        soup.find("div", class_=lambda c: c and "article" in c.lower())
-    )
-
-    if not article:
-        return []
 
     content = []
 
-    # 🟢 Headline
-    h1 = soup.find("h1")
-    if h1:
-        title = h1.get_text(strip=True)
-        if title:
-            content.append(("heading", title))
+    # ---------- 1️⃣ TRY STRUCTURED ARTICLE BODY (BEST SOURCE) ----------
+    ld_json_blocks = soup.find_all("script", type="application/ld+json")
 
-    # 🟢 Paragraphs ONLY (no lists, no widgets)
-    for p in article.find_all("p", recursive=True):
-        # Remove inline junk
-        for junk in p.find_all(["a", "span"], recursive=True):
-            junk.unwrap()
+    for block in ld_json_blocks:
+        try:
+            data = json.loads(block.string)
+            if isinstance(data, dict) and "articleBody" in data:
+                body = data["articleBody"]
+                paragraphs = [p.strip() for p in body.split("\n") if len(p.strip()) > 15]
 
-        txt = p.get_text(separator=" ", strip=True)
+                # Title
+                if "headline" in data:
+                    content.append(("heading", data["headline"].strip()))
 
-        # Hard filters
-        if (
-            not txt
-            or len(txt) < 25
-            or txt.lower().startswith(("image:", "note:", "source:", "also read"))
-            or "keep reading" in txt.lower()
-        ):
+                for p in paragraphs:
+                    content.append(("paragraph", p))
+
+                return content
+        except Exception:
+            pass
+
+    # ---------- 2️⃣ FALLBACK: RAW HTML EXTRACTION ----------
+    article = (
+        soup.find("article")
+        or soup.find("div", class_=lambda c: c and "article" in c.lower())
+        or soup
+    )
+
+    seen = set()
+
+    title = soup.find("h1")
+    if title:
+        content.append(("heading", title.get_text(strip=True)))
+
+    for el in article.find_all(["p", "li"], recursive=True):
+        txt = "".join(el.strings).strip()
+
+        if not txt or len(txt) < 15:
             continue
 
+        lower = txt.lower()
+        if any(x in lower for x in [
+            "also read",
+            "click here",
+            "disclaimer",
+            "follow us",
+            "to read more articles"
+        ]):
+            continue
+
+        if txt in seen:
+            continue
+
+        seen.add(txt)
         content.append(("paragraph", txt))
 
     return content
-
 # =================================================
 # LOAD MODELS
 # =================================================
