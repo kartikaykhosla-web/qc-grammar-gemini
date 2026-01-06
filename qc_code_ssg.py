@@ -119,10 +119,10 @@ def clean_article(url):
 
     content = []
 
-    # ---------- 1️⃣ TRY STRUCTURED ARTICLE BODY (BEST SOURCE) ----------
-    ld_json_blocks = soup.find_all("script", type="application/ld+json")
+   # ---------- 1️⃣ TRY STRUCTURED ARTICLE BODY (BEST SOURCE) ----------
+ld_json_blocks = soup.find_all("script", type="application/ld+json")
 
-    for block in ld_json_blocks:
+for block in ld_json_blocks:
     try:
         data = json.loads(block.string)
 
@@ -145,7 +145,7 @@ def clean_article(url):
             for p in paragraphs:
                 content.append(("paragraph", p))
 
-            break  # IMPORTANT: do NOT return
+            break  # IMPORTANT: do NOT return — allow HTML fallback
 
     except Exception:
         pass
