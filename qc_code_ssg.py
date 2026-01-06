@@ -127,41 +127,44 @@ def clean_article(url):
 
     # ---------- FULL-BODY PARAGRAPH WALK ----------
     # Walk the DOM in order, NOT inside <article>
-  STOP_MARKERS = [
-    "don't miss",
-    "dont miss",
-    "our aim is to provide",
-    "explore the world",
-    "copyright",
-    "for any feedback",
-    "all rights reserved",
-]
+    STOP_MARKERS = [
+        "don't miss",
+        "dont miss",
+        "our aim is to provide",
+        "explore the world",
+        "copyright",
+        "for any feedback",
+        "all rights reserved",
+    ]
 
-for el in soup.find_all(["p", "li"], recursive=True):
-    txt = el.get_text(separator=" ", strip=True)
+    for el in soup.find_all(["p", "li"], recursive=True):
+        txt = el.get_text(separator=" ", strip=True)
 
-    if not txt or len(txt) < 20:
-        continue
+        if not txt or len(txt) < 20:
+            continue
 
-    lower = txt.lower()
+        lower = txt.lower()
 
-    # 🛑 HARD STOP: article ends here
-    if any(marker in lower for marker in STOP_MARKERS):
-        break
+        # 🛑 HARD STOP: article ends here
+        if any(marker in lower for marker in STOP_MARKERS):
+            break
 
-    # skip obvious noise before stop
-    if any(x in lower for x in [
-        "also read",
-        "click here",
-        "follow us",
-    ]):
-        continue
+        # skip obvious noise before stop
+        if any(x in lower for x in [
+            "also read",
+            "click here",
+            "follow us",
+        ]):
+            continue
 
-    if txt in seen:
-        continue
+        if txt in seen:
+            continue
 
-    seen.add(txt)
-    content.append(("paragraph", txt))
+        seen.add(txt)
+        content.append(("paragraph", txt))
+
+    return content
+
 
 # =================================================
 # LOAD MODELS
