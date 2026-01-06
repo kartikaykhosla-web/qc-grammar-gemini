@@ -386,15 +386,34 @@ Return output strictly as a table:
 def filter_invalid_rows(gemini_md, article_text):
     lines = gemini_md.splitlines()
     out = []
+
     for line in lines:
-        if "|" in line and not line.strip().startswith("| Original"):
-            cols = [c.strip() for c in line.split("|")]
-            if len(cols) >= 3:
-                original = cols[1]
-                if original and original in article_text:
-                    out.append(line)
-        else:
+        if "|" not in line or line.strip().startswith("| Original"):
             out.append(line)
+            continue
+
+        cols = [c.strip() for c in line.split("|")]
+        if len(cols) < 3:
+            continue
+
+        original = cols[1]
+
+        # 1️⃣ Must exist verbatim
+        if original not in article_text:
+            continue
+
+        # 2️⃣ Must NOT span sentence boundaries
+        # Reject if original crosses punctuation joins
+        boundary_pattern = re.escape(original).replace("\\ ", r"\s+")
+        if not re.search(rf"(?<![.!?]){boundary_pattern}(?![.!?])", article_text):
+            continue
+
+        # 3️⃣ Reject multi-sentence hallucinations
+        if any(p in original for p in [". ", "? ", "! "]):
+            continue
+
+        out.append(line)
+
     return "\n".join(out)
 
 # =================================================
@@ -479,8 +498,13 @@ if article_content:
             st.write(t)
 
     with col2:
-        st.subheader("🤖 Gemini QC Review")
-        st.markdown(gemini_grammar_review(qc_content))
+    st.subheader("🤖 Gemini QC Review")
+
+    raw = gemini_grammar_review(qc_content)
+    article_text = "\n".join(t for _, t in qc_content)
+
+    clean = filter_invalid_rows(raw, article_text)
+    st.markdown(clean)
 
     st.divider()
 
