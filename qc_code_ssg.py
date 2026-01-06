@@ -125,16 +125,23 @@ def clean_article(url):
     if title:
         content.append(("heading", title.get_text(strip=True)))
 
-    # ---------- FULL-BODY PARAGRAPH WALK ----------
-    # Walk the DOM in order, NOT inside <article>
-    STOP_MARKERS = [
-        "don't miss",
-        "dont miss",
+    # ---------- TRUE FOOTER STOP MARKERS ----------
+    HARD_STOP_MARKERS = [
         "our aim is to provide",
         "explore the world",
         "copyright",
-        "for any feedback",
         "all rights reserved",
+        "for any feedback",
+        "compliant_gro@",
+    ]
+
+    # ---------- SOFT SKIP MARKERS (DO NOT BREAK) ----------
+    SOFT_SKIP_MARKERS = [
+        "don't miss",
+        "dont miss",
+        "also read",
+        "click here",
+        "follow us",
     ]
 
     for el in soup.find_all(["p", "li"], recursive=True):
@@ -145,16 +152,16 @@ def clean_article(url):
 
         lower = txt.lower()
 
-        # 🛑 HARD STOP: article ends here
-        if any(marker in lower for marker in STOP_MARKERS):
+        # 🛑 HARD STOP → footer / legal / site boilerplate
+        if any(marker in lower for marker in HARD_STOP_MARKERS):
             break
 
-        # skip obvious noise before stop
-        if any(x in lower for x in [
-            "also read",
-            "click here",
-            "follow us",
-        ]):
+        # ⛔ SKIP widget headers / navigation
+        if any(marker in lower for marker in SOFT_SKIP_MARKERS):
+            continue
+
+        # ⛔ SKIP numbered widget lists (1…, 2…, 3…)
+        if re.match(r"^\d+\s+", txt):
             continue
 
         if txt in seen:
