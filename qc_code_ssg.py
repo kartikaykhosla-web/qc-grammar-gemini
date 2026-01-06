@@ -122,35 +122,34 @@ def clean_article(url):
     # ---------- 1️⃣ TRY STRUCTURED ARTICLE BODY (BEST SOURCE) ----------
     ld_json_blocks = soup.find_all("script", type="application/ld+json")
 
-for block in ld_json_blocks:
-    try:
-        data = json.loads(block.string)
+    for block in ld_json_blocks:
+        try:
+            data = json.loads(block.string)
 
-        if isinstance(data, dict) and "articleBody" in data:
-            body = html.unescape(data["articleBody"])
+            if isinstance(data, dict) and "articleBody" in data:
+                body = html.unescape(data["articleBody"])
 
-            # ⛔ Guard against publisher-stripped punctuation
-            punctuation_density = sum(body.count(p) for p in [".", ",", "?", "!"])
-            if punctuation_density < len(body) * 0.005:
-                break  # FALL BACK to HTML extraction
+                # ⛔ Guard against publisher-stripped punctuation
+                punctuation_density = sum(body.count(p) for p in [".", ",", "?", "!"])
+                if punctuation_density < len(body) * 0.005:
+                    break  # FALL BACK to HTML extraction
 
-            paragraphs = [
-                p.strip()
-                for p in re.split(r"\n{2,}", body)
-                if len(p.strip()) > 15
-            ]
+                paragraphs = [
+                    p.strip()
+                    for p in re.split(r"\n{2,}", body)
+                    if len(p.strip()) > 15
+                ]
 
-            if "headline" in data:
-                content.append(("heading", data["headline"].strip()))
+                if "headline" in data:
+                    content.append(("heading", data["headline"].strip()))
 
-            for p in paragraphs:
-                content.append(("paragraph", p))
+                for p in paragraphs:
+                    content.append(("paragraph", p))
 
-            return content
+                return content
 
-    except Exception:
-        pass
-
+        except Exception:
+            pass
 
     # ---------- 2️⃣ FALLBACK: RAW HTML EXTRACTION ----------
     article = (
