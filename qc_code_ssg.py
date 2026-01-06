@@ -123,38 +123,38 @@ def clean_article(url):
     ld_json_blocks = soup.find_all("script", type="application/ld+json")
 
     for block in ld_json_blocks:
-    try:
-        data = json.loads(block.string)
-
-        if isinstance(data, dict) and "articleBody" in data:
-            body = html.unescape(data["articleBody"])
-
-            paragraphs = [
-                p.strip()
-                for p in re.split(r"\n+", body)
-                if len(p.strip()) > 15
-            ]
-
-            # ---------- LOGICAL COMPLETENESS CHECK ----------
-            ends_cleanly = body.strip().endswith((".", "!", "?", "”", "’"))
-            has_structure = any(
-                re.search(r"\b(Day|According to|As per|Meanwhile|However|In India)\b", p)
-                for p in paragraphs
-            )
-
-            if len(paragraphs) < 4 or not ends_cleanly or not has_structure:
-                break  # ❗ NOT a full article → fall back to HTML
-
-            if "headline" in data:
-                content.append(("heading", data["headline"].strip()))
-
-            for p in paragraphs:
-                content.append(("paragraph", p))
-
-            return content  # ✅ ONLY return when logically complete
-
-    except Exception:
-        pass
+        try:
+            data = json.loads(block.string)
+    
+            if isinstance(data, dict) and "articleBody" in data:
+                body = html.unescape(data["articleBody"])
+    
+                paragraphs = [
+                    p.strip()
+                    for p in re.split(r"\n+", body)
+                    if len(p.strip()) > 15
+                ]
+    
+                # ---------- LOGICAL COMPLETENESS CHECK ----------
+                ends_cleanly = body.strip().endswith((".", "!", "?", "”", "’"))
+                has_structure = any(
+                    re.search(r"\b(Day|According to|As per|Meanwhile|However|In India)\b", p)
+                    for p in paragraphs
+                )
+    
+                if len(paragraphs) < 4 or not ends_cleanly or not has_structure:
+                    break  # ❗ NOT a full article → fall back to HTML
+    
+                if "headline" in data:
+                    content.append(("heading", data["headline"].strip()))
+    
+                for p in paragraphs:
+                    content.append(("paragraph", p))
+    
+                return content  # ✅ ONLY return when logically complete
+    
+        except Exception:
+            pass
 
 
     # ---------- 2️⃣ FALLBACK: RAW HTML EXTRACTION ----------
