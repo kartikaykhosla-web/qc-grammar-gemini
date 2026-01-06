@@ -126,7 +126,12 @@ def clean_article(url):
         try:
             data = json.loads(block.string)
             if isinstance(data, dict) and "articleBody" in data:
-                body = html.unescape(data["articleBody"])
+            body = html.unescape(data["articleBody"])
+
+            # ⛔ Guard against publisher-stripped punctuation
+            punctuation_density = sum(body.count(p) for p in [".", ",", "?", "!"])
+            if punctuation_density < len(body) * 0.005:
+                break  # FALL BACK to HTML extraction
 
                 paragraphs = [
                     p.strip()
