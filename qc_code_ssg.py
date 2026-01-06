@@ -153,7 +153,7 @@ def clean_article(url):
         content.append(("heading", title.get_text(strip=True)))
 
     for el in article.find_all(["p", "li"], recursive=True):
-        txt = "".join(el.strings).strip()
+        txt = el.get_text(separator=" ", strip=True)
 
         if not txt or len(txt) < 15:
             continue
