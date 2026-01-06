@@ -473,12 +473,10 @@ def run_pipeline(content):
             final.append((ctype, text))
             continue
 
-        step1 = correct_spelling_minimal(text)
-        step2 = correct_grammar_languagetool(step1)
-        final.append((ctype, step2))
+        # ❗ DO NOT mutate article text before Gemini
+        final.append((ctype, text))
 
     return final
-
 
 # =================================================
 # STREAMLIT UI
