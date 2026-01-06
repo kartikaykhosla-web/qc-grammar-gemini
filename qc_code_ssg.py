@@ -321,14 +321,11 @@ def gemini_grammar_review(article_data):
         if ctype == "paragraph"
     ]
 
-    article_blob = "\n".join(paragraphs)
-
-    prompt = f"""
+    BASE_PROMPT = """
 You are a professional proofreader.
 
 Rules (STRICT):
 - Review each paragraph independently
-- Use context from other paragraphs
 - Only fix spelling and grammar
 - Do NOT change numbers
 - British English is the ONLY accepted standard
@@ -338,7 +335,7 @@ Rules (STRICT):
 - NEVER modify social media platform names or product/platform identifiers
   (e.g., X, Twitter, Facebook, Instagram)
 - NEVER modify single-letter proper nouns (e.g., X)
-- If unsure, do no hallucinate.
+- If unsure, do NOT hallucinate
 - Do NOT normalize legal, political, or platform references
 
 CRITICAL CONSTRAINTS:
@@ -353,50 +350,35 @@ ABSOLUTE RULE:
 - Treat the TEXT as a raw byte string
 - Do NOT normalize whitespace, punctuation, or casing
 - Periods, commas, apostrophes, and abbreviations must be preserved exactly
-- Each paragraph is independent.
-- Do NOT use knowledge from previous or following paragraphs.
 
 ABBREVIATION SAFETY:
-- Single-letter abbreviations followed by a period (e.g., "S.", "X.", "U.") are VALID
-- Do NOT expand, replace, or reinterpret them
+- Single-letter abbreviations followed by a period (e.g., "S.", "X.") are VALID
 
-⬅ ADDED — INLINE CONTENT SAFETY:
-- Hyperlinks, anchor text, or inline formatting may exist in the source
-- Treat all input as already-rendered plain text
-- Do NOT assume missing or extra spaces around punctuation
-- Do NOT infer spacing changes caused by links or HTML tags
+INLINE CONTENT SAFETY:
+- Hyperlinks or anchor text may exist
+- Treat input as already-rendered plain text
+- Do NOT infer missing spaces caused by HTML
 
-⬅ ADDED — PLATFORM NAME SAFETY:
-- The social media platform "X" must NEVER be interpreted as "A"
-- Do NOT suggest corrections involving "in an X post", "on X", or similar phrases
-- If the platform name is a single letter, it is intentional and correct
+PLATFORM NAME SAFETY:
+- The platform "X" must NEVER be interpreted as "A"
 
 Return output strictly as a table:
 | Original | Corrected | Reason |
-
-responses = []
-
-for para in paragraphs:
-    prompt = BASE_PROMPT + f"""
-
-TEXT:
-{para}
-"""
-    try:
-        resp = model.generate_content(prompt).text
-        responses.append(resp)
-    except Exception:
-        continue
-
-return "\n".join(responses)
-
 """
 
-    try:
-        raw = model.generate_content(prompt).text
-        return filter_gemini_rows(raw, article_blob)
-    except Exception as e:
-        return f"⚠️ Gemini unavailable:\n\n{e}"
+    responses = []
+
+    for para in paragraphs:
+        prompt = BASE_PROMPT + "\n\nTEXT:\n" + para
+
+        try:
+            resp = model.generate_content(prompt).text
+            responses.append(resp)
+        except Exception:
+            continue
+
+    return "\n".join(responses)
+)
 
 # ============================
 Invalid rows
@@ -414,10 +396,6 @@ def filter_invalid_rows(gemini_md, article_text):
         else:
             out.append(line)
     return "\n".join(out)
-
-raw = gemini_grammar_review(qc_content)
-clean = filter_invalid_rows(raw, "\n".join(t for _, t in qc_content))
-st.markdown(clean)
 
 # =================================================
 # FACT CHECK — SECOND PASS (ADDED, ISOLATED)
