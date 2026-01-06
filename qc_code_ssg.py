@@ -137,18 +137,10 @@ def clean_docx(file_path):
 
 def clean_article(url):
     headers = {"User-Agent": "Mozilla/5.0"}
+    response = requests.get(url, headers=headers, timeout=15)
+    response.raise_for_status()
 
-    # ---- STEP 1: Fetch HTML (JS or non-JS) ----
-    if needs_js_rendering(url):
-        html = fetch_rendered_html(url)
-        source_type = "js"
-    else:
-        response = requests.get(url, headers=headers, timeout=15)
-        response.raise_for_status()
-        html = response.text
-        source_type = "static"
-
-    soup = BeautifulSoup(html, "html.parser")
+    soup = BeautifulSoup(response.text, "html.parser")
 
     article = (
         soup.find("article")
@@ -156,19 +148,16 @@ def clean_article(url):
         or soup
     )
 
-    content, seen = [], set()
+    content = []
+    seen = set()
 
     title = soup.find("h1")
     if title:
-        content.append(("heading", title.get_text(strip=True)))
-
-    paragraphs_found = 0
+        content.append(("heading", title.get_text()))
 
     for el in article.find_all(["p", "li"], recursive=True):
-        txt = el.get_text(separator=" ", strip=False)
-
-        # Normalize ONLY HTML artefacts (NOT punctuation)
-        txt = re.sub(r"\s+", " ", txt).strip()
+        # 🔴 CRITICAL: preserve text exactly as browser renders it
+        txt = "".join(el.stripped_strings)
 
         if not txt or len(txt) < 15:
             continue
@@ -176,7 +165,7 @@ def clean_article(url):
         if any(j in txt.lower() for j in [
             "also read",
             "click here",
-            "disclaimer:",
+            "disclaimer",
             "follow us",
             "to read more articles"
         ]):
@@ -187,17 +176,9 @@ def clean_article(url):
 
         content.append(("paragraph", txt))
         seen.add(txt)
-        paragraphs_found += 1
-
-    # ---- STEP 2: Partial article detection ----
-    if source_type == "static" and paragraphs_found < 5:
-        st.warning(
-            "⚠️ Partial article detected. "
-            "This page likely loads content dynamically. "
-            "Switching to JS rendering is recommended."
-        )
 
     return content
+
 # =================================================
 # LOAD MODELS
 # =================================================
