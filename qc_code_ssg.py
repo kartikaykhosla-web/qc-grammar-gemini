@@ -139,25 +139,30 @@ def clean_article(url):
     headers = {"User-Agent": "Mozilla/5.0"}
     response = requests.get(url, headers=headers, timeout=15)
     response.raise_for_status()
-
     soup = BeautifulSoup(response.text, "html.parser")
 
     article = (
         soup.find("article")
-        or soup.find("div", class_=lambda c: c and "article" in c.lower())
+        or soup.find("div", class_=lambda c: c and "article" in c)
         or soup
     )
 
-    content = []
-    seen = set()
+    content, seen = [], set()
 
     title = soup.find("h1")
     if title:
-        content.append(("heading", title.get_text()))
+        content.append(("heading", title.get_text(strip=True)))
 
     for el in article.find_all(["p", "li"], recursive=True):
-        # 🔴 CRITICAL: preserve text exactly as browser renders it
-        txt = "".join(el.stripped_strings)
+        # 🔑 CRITICAL FIX:
+        # - preserve inline spacing
+        # - preserve punctuation adjacency
+        # - do NOT strip aggressively
+        txt = el.get_text(separator=" ", strip=False)
+
+        # Normalize ONLY newlines/tabs, NOT spaces around punctuation
+        txt = re.sub(r"[\r\n\t]+", " ", txt)
+        txt = re.sub(r"\s{2,}", " ", txt).strip()
 
         if not txt or len(txt) < 15:
             continue
@@ -165,7 +170,7 @@ def clean_article(url):
         if any(j in txt.lower() for j in [
             "also read",
             "click here",
-            "disclaimer",
+            "disclaimer:",
             "follow us",
             "to read more articles"
         ]):
