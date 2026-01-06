@@ -378,7 +378,7 @@ Return output strictly as a table:
             continue
 
     return "\n".join(responses)
-)
+
 
 # ============================
 Invalid rows
