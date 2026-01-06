@@ -495,25 +495,30 @@ if article_content:
 
     col1, col2 = st.columns(2)
 
+    # ---------- LEFT COLUMN ----------
     with col1:
         st.subheader("📄 Final Article")
         for _, t in qc_content:
             st.write(t)
 
+    # ---------- RIGHT COLUMN ----------
     with col2:
         st.subheader("🤖 Gemini QC Review")
 
         raw = gemini_grammar_review(qc_content)
-        article_text = "\n".join(t for _, t in qc_content)
+
+        article_text = "\n".join(
+            t for c, t in article_content if c == "paragraph"
+        )
 
         clean = filter_invalid_rows(raw, article_text)
         st.markdown(clean)
 
+    # ---------- BELOW COLUMNS ----------
     st.divider()
 
     if st.button("🔍 Run Fact Check (Second Pass)"):
         st.subheader("📌 Fact Check Results")
         st.markdown(gemini_fact_check(qc_content))
-
 
 
