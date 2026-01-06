@@ -123,32 +123,39 @@ def clean_article(url):
     ld_json_blocks = soup.find_all("script", type="application/ld+json")
 
     for block in ld_json_blocks:
-        try:
-            data = json.loads(block.string)
+    try:
+        data = json.loads(block.string)
 
-            if isinstance(data, dict) and "articleBody" in data:
-                body = html.unescape(data["articleBody"])
+        if isinstance(data, dict) and "articleBody" in data:
+            body = html.unescape(data["articleBody"])
 
-                punctuation_density = sum(body.count(p) for p in [".", ",", "?", "!"])
-                if punctuation_density < len(body) * 0.005:
-                    break  # FALL BACK fully to HTML
+            paragraphs = [
+                p.strip()
+                for p in re.split(r"\n+", body)
+                if len(p.strip()) > 15
+            ]
 
-                paragraphs = [
-                    p.strip()
-                    for p in re.split(r"\n{2,}", body)
-                    if len(p.strip()) > 15
-                ]
+            # ---------- LOGICAL COMPLETENESS CHECK ----------
+            ends_cleanly = body.strip().endswith((".", "!", "?", "”", "’"))
+            has_structure = any(
+                re.search(r"\b(Day|According to|As per|Meanwhile|However|In India)\b", p)
+                for p in paragraphs
+            )
 
-                if "headline" in data:
-                    content.append(("heading", data["headline"].strip()))
+            if len(paragraphs) < 4 or not ends_cleanly or not has_structure:
+                break  # ❗ NOT a full article → fall back to HTML
 
-                for p in paragraphs:
-                    content.append(("paragraph", p))
+            if "headline" in data:
+                content.append(("heading", data["headline"].strip()))
 
-                break  # IMPORTANT: do NOT return — allow HTML fallback
+            for p in paragraphs:
+                content.append(("paragraph", p))
 
-        except Exception:
-            pass
+            return content  # ✅ ONLY return when logically complete
+
+    except Exception:
+        pass
+
 
     # ---------- 2️⃣ FALLBACK: RAW HTML EXTRACTION ----------
     article = (
@@ -312,12 +319,13 @@ def gemini_grammar_review(article_data):
     ]
 
     BASE_PROMPT = """
-You are a professional proofreader.
+You are a professional proofreader and a content QC professional.
 
 Rules (STRICT):
 - Review each paragraph independently
 - Only fix spelling and grammar
 - Do NOT change numbers
+- Understand the context and suggest grammatical changes basis the context if required
 - British English is the ONLY accepted standard
 - Convert American English spellings to British English where applicable
 - NEVER change proper nouns, political parties, or person names
