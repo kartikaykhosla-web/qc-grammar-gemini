@@ -1,7 +1,6 @@
 streamlit
 requests
 beautifulsoup4>=4.9.0
-playwright==1.43.0
 spacy
 python-docx
 language-tool-python
