@@ -12,6 +12,7 @@ import base64
 import requests
 import tempfile
 import streamlit as st
+import html
 from bs4 import BeautifulSoup
 from google.oauth2 import service_account
 from difflib import SequenceMatcher
@@ -125,10 +126,14 @@ def clean_article(url):
         try:
             data = json.loads(block.string)
             if isinstance(data, dict) and "articleBody" in data:
-                body = data["articleBody"]
-                paragraphs = [p.strip() for p in body.split("\n") if len(p.strip()) > 15]
+                body = html.unescape(data["articleBody"])
 
-                # Title
+                paragraphs = [
+                    p.strip()
+                    for p in re.split(r"\n{2,}", body)
+                    if len(p.strip()) > 15
+                ]
+
                 if "headline" in data:
                     content.append(("heading", data["headline"].strip()))
 
@@ -175,27 +180,6 @@ def clean_article(url):
         content.append(("paragraph", txt))
 
     return content
-
-def is_structural_line(text: str) -> bool:
-    t = text.strip()
-
-    # Very short fragments
-    if len(t.split()) <= 3:
-        return True
-
-    # Headings / labels (Title Case, no verb)
-    if t.istitle() and not any(v in t.lower() for v in ["is", "was", "are", "were", "has", "have"]):
-        return True
-
-    # List / section markers
-    if re.match(r"^(Day|India|Note|Story|About|Done|Weekend|Monday|Tuesday)\b", t):
-        return True
-
-    # No verb at all → not a sentence
-    if not re.search(r"\b(is|was|were|are|has|have|had|said|says)\b", t.lower()):
-        return True
-
-    return False
 
 # =================================================
 # LOAD MODELS
