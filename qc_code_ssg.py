@@ -368,44 +368,45 @@ Return output strictly as a table:
 
     responses = []
 
+    # 1️⃣ Call Gemini per paragraph
     for para in paragraphs:
         prompt = BASE_PROMPT + "\n\nTEXT:\n" + para
-
         try:
             resp = model.generate_content(prompt).text
             responses.append(resp)
         except Exception:
             continue
 
+    # 2️⃣ Collect ONLY table rows (no duplicate headers)
     rows = []
 
-for resp in responses:
-    for line in resp.splitlines():
-        line = line.strip()
-        if not line:
-            continue
+    for resp in responses:
+        for line in resp.splitlines():
+            line = line.strip()
+            if not line:
+                continue
 
-        # Skip headers & separators
-        if line.startswith("| Original"):
-            continue
-        if line.startswith("|---"):
-            continue
+            # Skip headers & separators
+            if line.startswith("| Original"):
+                continue
+            if line.startswith("|---"):
+                continue
 
-        # Keep only valid table rows
-        if line.count("|") >= 3:
-            rows.append(line)
+            # Keep only valid table rows
+            if line.count("|") >= 3:
+                rows.append(line)
 
-if not rows:
-    return ""
+    if not rows:
+        return ""
 
-table = [
-    "| Original | Corrected | Reason |",
-    "|---|---|---|",
-    *rows
-]
+    # 3️⃣ Build ONE clean table
+    table = [
+        "| Original | Corrected | Reason |",
+        "|---|---|---|",
+        *rows
+    ]
 
-return "\n".join(table)
-
+    return "\n".join(table)
 
 # ============================
 # Invalid rows
