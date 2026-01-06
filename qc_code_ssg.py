@@ -352,8 +352,21 @@ ABBREVIATION SAFETY:
 Return output strictly as a table:
 | Original | Corrected | Reason |
 
+responses = []
+
+for para in paragraphs:
+    prompt = BASE_PROMPT + f"""
+
 TEXT:
-{chr(10).join(f"[START PARAGRAPH]\\n{p}\\n[END PARAGRAPH]" for p in paragraphs)}
+{para}
+"""
+    try:
+        resp = model.generate_content(prompt).text
+        responses.append(resp)
+    except Exception:
+        continue
+
+return "\n".join(responses)
 
 """
 
@@ -362,6 +375,28 @@ TEXT:
         return filter_gemini_rows(raw, article_blob)
     except Exception as e:
         return f"⚠️ Gemini unavailable:\n\n{e}"
+
+# ============================
+Invalid rows
+#=============================
+def filter_invalid_rows(gemini_md, article_text):
+    lines = gemini_md.splitlines()
+    out = []
+    for line in lines:
+        if "|" in line and not line.strip().startswith("| Original"):
+            cols = [c.strip() for c in line.split("|")]
+            if len(cols) >= 3:
+                original = cols[1]
+                if original and original in article_text:
+                    out.append(line)
+        else:
+            out.append(line)
+    return "\n".join(out)
+
+raw = gemini_grammar_review(qc_content)
+clean = filter_invalid_rows(raw, "\n".join(t for _, t in qc_content))
+st.markdown(clean)
+
 # =================================================
 # FACT CHECK — SECOND PASS (ADDED, ISOLATED)
 # =================================================
