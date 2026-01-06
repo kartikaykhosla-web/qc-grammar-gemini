@@ -354,7 +354,8 @@ Return output strictly as a table:
 | Original | Corrected | Reason |
 
 TEXT:
-{chr(10).join(f"[PARAGRAPH]\\n{p}" for p in paragraphs)}
+{chr(10).join(f"[START PARAGRAPH]\\n{p}\\n[END PARAGRAPH]" for p in paragraphs)}
+
 """
 
     try:
