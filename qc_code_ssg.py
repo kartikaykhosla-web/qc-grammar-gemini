@@ -114,36 +114,52 @@ def clean_article(url):
     headers = {"User-Agent": "Mozilla/5.0"}
     response = requests.get(url, headers=headers, timeout=15)
     response.raise_for_status()
-
     soup = BeautifulSoup(response.text, "html.parser")
 
-    # Find article container
+    content = []
+
+    # ---------- 1️⃣ TRY STRUCTURED ARTICLE BODY (BEST SOURCE) ----------
+    ld_json_blocks = soup.find_all("script", type="application/ld+json")
+
+    for block in ld_json_blocks:
+        try:
+            data = json.loads(block.string)
+            if isinstance(data, dict) and "articleBody" in data:
+                body = data["articleBody"]
+                paragraphs = [p.strip() for p in body.split("\n") if len(p.strip()) > 15]
+
+                # Title
+                if "headline" in data:
+                    content.append(("heading", data["headline"].strip()))
+
+                for p in paragraphs:
+                    content.append(("paragraph", p))
+
+                return content
+        except Exception:
+            pass
+
+    # ---------- 2️⃣ FALLBACK: RAW HTML EXTRACTION ----------
     article = (
         soup.find("article")
         or soup.find("div", class_=lambda c: c and "article" in c.lower())
         or soup
     )
 
-    content, seen = [], set()
+    seen = set()
 
-    # Extract title
-    title_el = soup.find("h1")
-    if title_el:
-        title_text = title_el.get_text(separator="", strip=True)
-        if title_text:
-            content.append(("heading", title_text))
+    title = soup.find("h1")
+    if title:
+        content.append(("heading", title.get_text(strip=True)))
 
-    # Collect all text nodes inside paragraphs and list items
     for el in article.find_all(["p", "li"], recursive=True):
-        # This preserves node order and internal text exactly
-        text_nodes = list(el.strings)
-        txt = "".join(text_nodes).strip()
+        txt = "".join(el.strings).strip()
 
         if not txt or len(txt) < 15:
             continue
 
-        lower_txt = txt.lower()
-        if any(block in lower_txt for block in [
+        lower = txt.lower()
+        if any(x in lower for x in [
             "also read",
             "click here",
             "disclaimer",
