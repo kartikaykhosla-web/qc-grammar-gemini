@@ -123,34 +123,33 @@ def clean_article(url):
     ld_json_blocks = soup.find_all("script", type="application/ld+json")
 
     for block in ld_json_blocks:
-        try:
-            data = json.loads(block.string)
+    try:
+        data = json.loads(block.string)
 
-            if isinstance(data, dict) and "articleBody" in data:
-                body = html.unescape(data["articleBody"])
+        if isinstance(data, dict) and "articleBody" in data:
+            body = html.unescape(data["articleBody"])
 
-                # ⛔ Guard against publisher-stripped punctuation
-                punctuation_density = sum(body.count(p) for p in [".", ",", "?", "!"])
-                if punctuation_density < len(body) * 0.005:
-                    break  # FALL BACK to HTML extraction
+            punctuation_density = sum(body.count(p) for p in [".", ",", "?", "!"])
+            if punctuation_density < len(body) * 0.005:
+                break  # FALL BACK fully to HTML
 
-                paragraphs = [
-                    p.strip()
-                    for p in re.split(r"\n{2,}", body)
-                    if len(p.strip()) > 15
-                ]
+            paragraphs = [
+                p.strip()
+                for p in re.split(r"\n{2,}", body)
+                if len(p.strip()) > 15
+            ]
 
-                if "headline" in data:
-                    content.append(("heading", data["headline"].strip()))
+            if "headline" in data:
+                content.append(("heading", data["headline"].strip()))
 
-                for p in paragraphs:
-                    content.append(("paragraph", p))
+            for p in paragraphs:
+                content.append(("paragraph", p))
 
-                return content
+            break  # IMPORTANT: do NOT return
 
-        except Exception:
-            pass
-
+    except Exception:
+        pass
+        
     # ---------- 2️⃣ FALLBACK: RAW HTML EXTRACTION ----------
     article = (
         soup.find("article")
