@@ -118,74 +118,37 @@ def clean_article(url):
     soup = BeautifulSoup(response.text, "html.parser")
 
     content = []
-
-    # ---------- 1️⃣ TRY STRUCTURED ARTICLE BODY (BEST SOURCE) ----------
-    ld_json_blocks = soup.find_all("script", type="application/ld+json")
-
-    for block in ld_json_blocks:
-        try:
-            data = json.loads(block.string)
-    
-            if isinstance(data, dict) and "articleBody" in data:
-                body = html.unescape(data["articleBody"])
-    
-                paragraphs = [
-                    p.strip()
-                    for p in re.split(r"\n+", body)
-                    if len(p.strip()) > 15
-                ]
-    
-                # ---------- LOGICAL COMPLETENESS CHECK ----------
-                ends_cleanly = body.strip().endswith((".", "!", "?", "”", "’"))
-                has_structure = any(
-                    re.search(r"\b(Day|According to|As per|Meanwhile|However|In India)\b", p)
-                    for p in paragraphs
-                )
-    
-                if len(paragraphs) < 4 or not ends_cleanly or not has_structure:
-                    break  # ❗ NOT a full article → fall back to HTML
-    
-                if "headline" in data:
-                    content.append(("heading", data["headline"].strip()))
-    
-                for p in paragraphs:
-                    content.append(("paragraph", p))
-    
-                return content  # ✅ ONLY return when logically complete
-    
-        except Exception:
-            pass
-
-
-    # ---------- 2️⃣ FALLBACK: RAW HTML EXTRACTION ----------
-    article = (
-        soup.find("article")
-        or soup.find("div", class_=lambda c: c and "article" in c.lower())
-        or soup
-    )
-
     seen = set()
 
+    # ---------- TITLE ----------
     title = soup.find("h1")
     if title:
         content.append(("heading", title.get_text(strip=True)))
 
-    for el in article.find_all(["p", "li"], recursive=True):
+    # ---------- FULL-BODY PARAGRAPH WALK ----------
+    # Walk the DOM in order, NOT inside <article>
+    for el in soup.find_all(["p", "li"], recursive=True):
         txt = el.get_text(separator=" ", strip=True)
 
-        if not txt or len(txt) < 15:
+        if not txt or len(txt) < 20:
             continue
 
         lower = txt.lower()
+
+        # Noise filters
         if any(x in lower for x in [
             "also read",
             "click here",
             "disclaimer",
             "follow us",
-            "to read more articles"
+            "keep reading",
+            "image courtesy",
+            "don’t miss",
+            "dont miss",
         ]):
             continue
 
+        # De-duplication
         if txt in seen:
             continue
 
