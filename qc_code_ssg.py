@@ -351,18 +351,18 @@ Return output strictly as a table:
     except Exception:
         return ""
 
-    # 🔒 HARD GUARANTEE: extract ONLY valid 3-column rows
-    pattern = re.compile(
-        r"\|\s*(.*?)\s*\|\s*(.*?)\s*\|\s*(.*?)\s*\|",
-        re.DOTALL
+    # 🔒 STRICT row extraction — NO PIPE LEAKAGE
+    row_pattern = re.compile(
+        r"\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|"
     )
 
     rows = []
-    for original, corrected, reason in pattern.findall(raw):
-        # Skip header echo
-        if original.lower() == "original":
+    for original, corrected, reason in row_pattern.findall(raw):
+        if original.strip().lower() == "original":
             continue
-        rows.append(f"| {original.strip()} | {corrected.strip()} | {reason.strip()} |")
+        rows.append(
+            f"| {original.strip()} | {corrected.strip()} | {reason.strip()} |"
+        )
 
     if not rows:
         return ""
@@ -372,7 +372,6 @@ Return output strictly as a table:
         "|---|---|---|",
         *rows
     ])
-
 
 # ============================
 # Invalid rows
