@@ -146,6 +146,8 @@ def clean_article(url):
 
     for el in soup.find_all(["p", "li"], recursive=True):
         txt = el.get_text(separator=" ", strip=True)
+        # 🔥 FIX: remove space BEFORE punctuation introduced by HTML
+        txt = re.sub(r"\s+([,.;:!?])", r"\1", txt)
 
         if not txt or len(txt) < 20:
             continue
