@@ -351,18 +351,18 @@ Return output strictly as a table:
     except Exception:
         return ""
 
-    # 🔧 HARD FIX: Gemini sometimes returns everything on ONE LINE
-    tokens = [t.strip() for t in raw.split("|") if t.strip()]
-
-    # Remove echoed header if present
-    if tokens[:3] == ["Original", "Corrected", "Reason"]:
-        tokens = tokens[3:]
+    # 🔒 HARD GUARANTEE: extract ONLY valid 3-column rows
+    pattern = re.compile(
+        r"\|\s*(.*?)\s*\|\s*(.*?)\s*\|\s*(.*?)\s*\|",
+        re.DOTALL
+    )
 
     rows = []
-    for i in range(0, len(tokens), 3):
-        chunk = tokens[i:i + 3]
-        if len(chunk) == 3:
-            rows.append(f"| {chunk[0]} | {chunk[1]} | {chunk[2]} |")
+    for original, corrected, reason in pattern.findall(raw):
+        # Skip header echo
+        if original.lower() == "original":
+            continue
+        rows.append(f"| {original.strip()} | {corrected.strip()} | {reason.strip()} |")
 
     if not rows:
         return ""
@@ -372,6 +372,7 @@ Return output strictly as a table:
         "|---|---|---|",
         *rows
     ])
+
 
 # ============================
 # Invalid rows
