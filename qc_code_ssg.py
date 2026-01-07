@@ -328,17 +328,6 @@ ABSOLUTE RULE:
 - Do NOT normalize whitespace, punctuation, or casing
 - Periods, commas, apostrophes, and abbreviations must be preserved exactly
 
-ABBREVIATION SAFETY:
-- Single-letter abbreviations followed by a period (e.g., "S.", "X.") are VALID
-
-INLINE CONTENT SAFETY:
-- Hyperlinks or anchor text may exist
-- Treat input as already-rendered plain text
-- Do NOT infer missing spaces caused by HTML
-
-PLATFORM NAME SAFETY:
-- The platform "X" must NEVER be interpreted as "A"
-
 Return output strictly as a table:
 | Original | Corrected | Reason |
 """
@@ -351,18 +340,16 @@ Return output strictly as a table:
     except Exception:
         return ""
 
-    # 🔥 HARD FIX: rebuild a real markdown table
-    cells = [c.strip() for c in raw.split("|") if c.strip()]
+    # 🔥 REAL FIX — FORCE TABLE STRUCTURE
+    cells = [c.strip() for c in raw.replace("\n", " ").split("|") if c.strip()]
 
     rows = []
     for i in range(0, len(cells), 3):
-        row = cells[i:i + 3]
-        if len(row) != 3:
+        if i + 2 >= len(cells):
             continue
 
-        original, corrected, reason = row
+        original, corrected, reason = cells[i:i + 3]
 
-        # skip header junk
         if original.lower() == "original":
             continue
 
@@ -371,13 +358,10 @@ Return output strictly as a table:
     if not rows:
         return ""
 
-    table = [
-        "| Original | Corrected | Reason |",
-        "|---|---|---|",
-        *rows
-    ]
-
-    return "\n".join(table)
+    return "\n".join(
+        ["| Original | Corrected | Reason |",
+         "|---|---|---|"] + rows
+    )
 
 # ============================
 # Invalid rows
