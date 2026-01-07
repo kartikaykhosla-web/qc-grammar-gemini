@@ -328,6 +328,17 @@ ABSOLUTE RULE:
 - Do NOT normalize whitespace, punctuation, or casing
 - Periods, commas, apostrophes, and abbreviations must be preserved exactly
 
+ABBREVIATION SAFETY:
+- Single-letter abbreviations followed by a period (e.g., "S.", "X.") are VALID
+
+INLINE CONTENT SAFETY:
+- Hyperlinks or anchor text may exist
+- Treat input as already-rendered plain text
+- Do NOT infer missing spaces caused by HTML
+
+PLATFORM NAME SAFETY:
+- The platform "X" must NEVER be interpreted as "A"
+
 Return output strictly as a table:
 | Original | Corrected | Reason |
 """
@@ -340,17 +351,18 @@ Return output strictly as a table:
     except Exception:
         return ""
 
-    # 🔧 HARD PARSE PIPE STREAM
-    tokens = [t.strip() for t in raw.split("|") if t.strip()]
+    # 🔧 FIX GEMINI BROKEN TABLE FORMAT (NO PROMPT CHANGE)
+    parts = [p.strip() for p in raw.split("|") if p.strip()]
 
     rows = []
-    for i in range(0, len(tokens), 3):
-        chunk = tokens[i:i + 3]
+    for i in range(0, len(parts), 3):
+        chunk = parts[i:i + 3]
         if len(chunk) != 3:
             continue
 
         original, corrected, reason = chunk
 
+        # Skip header repetition
         if original.lower() == "original":
             continue
 
