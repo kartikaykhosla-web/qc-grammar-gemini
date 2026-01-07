@@ -328,17 +328,6 @@ ABSOLUTE RULE:
 - Do NOT normalize whitespace, punctuation, or casing
 - Periods, commas, apostrophes, and abbreviations must be preserved exactly
 
-ABBREVIATION SAFETY:
-- Single-letter abbreviations followed by a period (e.g., "S.", "X.") are VALID
-
-INLINE CONTENT SAFETY:
-- Hyperlinks or anchor text may exist
-- Treat input as already-rendered plain text
-- Do NOT infer missing spaces caused by HTML
-
-PLATFORM NAME SAFETY:
-- The platform "X" must NEVER be interpreted as "A"
-
 Return output strictly as a table:
 | Original | Corrected | Reason |
 """
@@ -351,18 +340,21 @@ Return output strictly as a table:
     except Exception:
         return ""
 
-    # 🔒 STRICT row extraction — NO PIPE LEAKAGE
-    row_pattern = re.compile(
-        r"\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|"
-    )
+    # 🔧 HARD PARSE PIPE STREAM
+    tokens = [t.strip() for t in raw.split("|") if t.strip()]
 
     rows = []
-    for original, corrected, reason in row_pattern.findall(raw):
-        if original.strip().lower() == "original":
+    for i in range(0, len(tokens), 3):
+        chunk = tokens[i:i + 3]
+        if len(chunk) != 3:
             continue
-        rows.append(
-            f"| {original.strip()} | {corrected.strip()} | {reason.strip()} |"
-        )
+
+        original, corrected, reason = chunk
+
+        if original.lower() == "original":
+            continue
+
+        rows.append(f"| {original} | {corrected} | {reason} |")
 
     if not rows:
         return ""
