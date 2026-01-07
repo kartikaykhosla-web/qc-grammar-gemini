@@ -328,45 +328,55 @@ ABSOLUTE RULE:
 - Do NOT normalize whitespace, punctuation, or casing
 - Periods, commas, apostrophes, and abbreviations must be preserved exactly
 
+ABBREVIATION SAFETY:
+- Single-letter abbreviations followed by a period (e.g., "S.", "X.") are VALID
+
+INLINE CONTENT SAFETY:
+- Hyperlinks or anchor text may exist
+- Treat input as already-rendered plain text
+- Do NOT infer missing spaces caused by HTML
+
+PLATFORM NAME SAFETY:
+- The platform "X" must NEVER be interpreted as "A"
+
 Return output strictly as a table:
 | Original | Corrected | Reason |
 """
 
-    combined_text = "\n\n---\n\n".join(paragraphs)
-    prompt = BASE_PROMPT + "\n\nTEXT:\n" + combined_text
-    
-    try:
-        raw = model.generate_content(prompt).text
-    except Exception:
+    responses = []
+
+    for para in paragraphs:
+        prompt = BASE_PROMPT + "\n\nTEXT:\n" + para
+        try:
+            responses.append(model.generate_content(prompt).text)
+        except Exception:
+            continue
+
+    if not responses:
         return ""
 
-    # 🔥 HARD FIX: normalize broken inline pipe output
-    raw = raw.replace(" | | ", "\n| ")
+    raw = "\n".join(responses)
 
-    lines = [l.strip() for l in raw.split("|") if l.strip()]
+    # 🔥 THE ACTUAL FIX: extract real rows even from inline garbage
+    matches = re.findall(
+        r"\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|",
+        raw
+    )
 
     rows = []
-    for i in range(0, len(lines), 3):
-        if i + 2 >= len(lines):
+    for original, corrected, reason in matches:
+        if original.strip().lower() == "original":
             continue
-
-        original, corrected, reason = lines[i:i + 3]
-
-        if original.lower() == "original":
-            continue
-
-        rows.append(f"| {original} | {corrected} | {reason} |")
+        rows.append(f"| {original.strip()} | {corrected.strip()} | {reason.strip()} |")
 
     if not rows:
         return ""
 
-    return "\n".join(
-        [
-            "| Original | Corrected | Reason |",
-            "|---|---|---|",
-            *rows,
-        ]
-    )
+    return "\n".join([
+        "| Original | Corrected | Reason |",
+        "|---|---|---|",
+        *rows
+    ])
 
 # ============================
 # Invalid rows
