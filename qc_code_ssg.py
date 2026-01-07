@@ -343,47 +343,38 @@ Return output strictly as a table:
 | Original | Corrected | Reason |
 """
 
-    responses = []
+    combined_text = "\n\n---\n\n".join(paragraphs)
+    prompt = BASE_PROMPT + "\n\nTEXT:\n" + combined_text
 
-    # 1️⃣ Call Gemini per paragraph
-    for para in paragraphs:
-        prompt = BASE_PROMPT + "\n\nTEXT:\n" + para
-        try:
-            resp = model.generate_content(prompt).text
-            responses.append(resp)
-        except Exception:
-            continue
+    try:
+        raw = model.generate_content(prompt).text
+    except Exception:
+        return ""
 
-    # 2️⃣ Collect ONLY table rows (no duplicate headers)
+    if "|" not in raw:
+        return ""
+
+    # 🔧 FIX: normalise Gemini pipe-stream into a real markdown table
+    cells = [c.strip() for c in raw.split("|") if c.strip()]
+
+    # Remove echoed header if Gemini repeats it
+    if cells[:3] == ["Original", "Corrected", "Reason"]:
+        cells = cells[3:]
+
     rows = []
-
-    for resp in responses:
-        for line in resp.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-
-            # Skip headers & separators
-            if line.startswith("| Original"):
-                continue
-            if line.startswith("|---"):
-                continue
-
-            # Keep only valid table rows
-            if line.count("|") >= 3:
-                rows.append(line)
+    for i in range(0, len(cells), 3):
+        chunk = cells[i:i + 3]
+        if len(chunk) == 3:
+            rows.append(f"| {chunk[0]} | {chunk[1]} | {chunk[2]} |")
 
     if not rows:
         return ""
 
-    # 3️⃣ Build ONE clean table
-    table = [
+    return "\n".join([
         "| Original | Corrected | Reason |",
         "|---|---|---|",
         *rows
-    ]
-
-    return "\n".join(table)
+    ])
 
 # ============================
 # Invalid rows
