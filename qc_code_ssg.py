@@ -382,37 +382,33 @@ Return output strictly as a table:
 # Invalid rows
 # ============================
 def filter_invalid_rows(gemini_md, article_text):
-    lines = gemini_md.splitlines()
-    out = []
+    # Extract rows even if Gemini returns everything inline
+    rows = re.findall(
+        r"\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|",
+        gemini_md
+    )
 
-    for line in lines:
-        if "|" not in line or line.strip().startswith("| Original"):
-            out.append(line)
+    output = []
+
+    for original, corrected, reason in rows:
+        if original.strip().lower() == "original":
             continue
 
-        cols = [c.strip() for c in line.split("|")]
-        if len(cols) < 3:
-            continue
-
-        original = cols[1]
-
-        # 1️⃣ Must exist verbatim
         if original not in article_text:
             continue
 
-        # 2️⃣ Must NOT span sentence boundaries
-        # Reject if original crosses punctuation joins
-        boundary_pattern = re.escape(original).replace("\\ ", r"\s+")
-        if not re.search(rf"(?<![.!?]){boundary_pattern}(?![.!?])", article_text):
-            continue
+        output.append(
+            f"| {original.strip()} | {corrected.strip()} | {reason.strip()} |"
+        )
 
-        # 3️⃣ Reject multi-sentence hallucinations
-        if any(p in original for p in [". ", "? ", "! "]):
-            continue
+    if not output:
+        return ""
 
-        out.append(line)
-
-    return "\n".join(out)
+    return "\n".join([
+        "| Original | Corrected | Reason |",
+        "|---|---|---|",
+        *output
+    ])
 
 # =================================================
 # FACT CHECK — SECOND PASS (ADDED, ISOLATED)
