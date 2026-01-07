@@ -336,32 +336,34 @@ Return output strictly as a table:
     prompt = BASE_PROMPT + "\n\nTEXT:\n" + combined_text
 
     try:
-        raw = model.generate_content(prompt).text
-    except Exception:
-        return ""
+    raw = model.generate_content(prompt).text
+except Exception:
+    return ""
 
-    # 🔥 REAL FIX — FORCE TABLE STRUCTURE
-    cells = [c.strip() for c in raw.replace("\n", " ").split("|") if c.strip()]
+# 🔥 HARD FIX: normalize broken inline pipe output
+raw = raw.replace(" | | ", "\n| ")
 
-    rows = []
-    for i in range(0, len(cells), 3):
-        if i + 2 >= len(cells):
-            continue
+lines = [l.strip() for l in raw.split("|") if l.strip()]
 
-        original, corrected, reason = cells[i:i + 3]
+rows = []
+for i in range(0, len(lines), 3):
+    if i + 2 >= len(lines):
+        continue
 
-        if original.lower() == "original":
-            continue
+    original, corrected, reason = lines[i:i+3]
 
-        rows.append(f"| {original} | {corrected} | {reason} |")
+    if original.lower() == "original":
+        continue
 
-    if not rows:
-        return ""
+    rows.append(f"| {original} | {corrected} | {reason} |")
 
-    return "\n".join(
-        ["| Original | Corrected | Reason |",
-         "|---|---|---|"] + rows
-    )
+if not rows:
+    return ""
+
+return "\n".join(
+    ["| Original | Corrected | Reason |",
+     "|---|---|---|"] + rows
+)
 
 # ============================
 # Invalid rows
