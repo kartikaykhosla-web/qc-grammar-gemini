@@ -347,19 +347,16 @@ Return output strictly as a table:
 
     responses = []
 
-    for para in paragraphs:
-        prompt = BASE_PROMPT + "\n\nTEXT:\n" + para
-        try:
-            responses.append(model.generate_content(prompt).text)
-        except Exception:
-            continue
+    # 🔧 FIX #1 — single Gemini call to prevent inline table corruption
+    combined_text = "\n\n---\n\n".join(paragraphs)
+    prompt = BASE_PROMPT + "\n\nTEXT:\n" + combined_text
 
-    if not responses:
+    try:
+        raw = model.generate_content(prompt).text
+    except Exception:
         return ""
 
-    raw = "\n".join(responses)
-
-    # 🔥 THE ACTUAL FIX: extract real rows even from inline garbage
+    # 🔧 FIX #2 — robust row extraction (handles inline | | garbage)
     matches = re.findall(
         r"\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|",
         raw
