@@ -334,36 +334,39 @@ Return output strictly as a table:
 
     combined_text = "\n\n---\n\n".join(paragraphs)
     prompt = BASE_PROMPT + "\n\nTEXT:\n" + combined_text
-
+    
     try:
-    raw = model.generate_content(prompt).text
-except Exception:
-    return ""
+        raw = model.generate_content(prompt).text
+    except Exception:
+        return ""
 
-# 🔥 HARD FIX: normalize broken inline pipe output
-raw = raw.replace(" | | ", "\n| ")
+    # 🔥 HARD FIX: normalize broken inline pipe output
+    raw = raw.replace(" | | ", "\n| ")
 
-lines = [l.strip() for l in raw.split("|") if l.strip()]
+    lines = [l.strip() for l in raw.split("|") if l.strip()]
 
-rows = []
-for i in range(0, len(lines), 3):
-    if i + 2 >= len(lines):
-        continue
+    rows = []
+    for i in range(0, len(lines), 3):
+        if i + 2 >= len(lines):
+            continue
 
-    original, corrected, reason = lines[i:i+3]
+        original, corrected, reason = lines[i:i + 3]
 
-    if original.lower() == "original":
-        continue
+        if original.lower() == "original":
+            continue
 
-    rows.append(f"| {original} | {corrected} | {reason} |")
+        rows.append(f"| {original} | {corrected} | {reason} |")
 
-if not rows:
-    return ""
+    if not rows:
+        return ""
 
-return "\n".join(
-    ["| Original | Corrected | Reason |",
-     "|---|---|---|"] + rows
-)
+    return "\n".join(
+        [
+            "| Original | Corrected | Reason |",
+            "|---|---|---|",
+            *rows,
+        ]
+    )
 
 # ============================
 # Invalid rows
