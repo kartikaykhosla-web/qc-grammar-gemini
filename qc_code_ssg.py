@@ -342,7 +342,6 @@ PLATFORM NAME SAFETY:
 Return output strictly as a table:
 | Original | Corrected | Reason |
 """
-
     combined_text = "\n\n---\n\n".join(paragraphs)
     prompt = BASE_PROMPT + "\n\nTEXT:\n" + combined_text
 
@@ -351,10 +350,10 @@ Return output strictly as a table:
     except Exception:
         return ""
 
-    # 🔧 FIX GEMINI BROKEN TABLE FORMAT (NO PROMPT CHANGE)
+    # 🔧 FIX: Convert pipe-separated output into paragraphs
     parts = [p.strip() for p in raw.split("|") if p.strip()]
 
-    rows = []
+    out = []
     for i in range(0, len(parts), 3):
         chunk = parts[i:i + 3]
         if len(chunk) != 3:
@@ -362,20 +361,16 @@ Return output strictly as a table:
 
         original, corrected, reason = chunk
 
-        # Skip header repetition
         if original.lower() == "original":
             continue
 
-        rows.append(f"| {original} | {corrected} | {reason} |")
+        out.append(
+            f"• **Original:** {original}\n"
+            f"  **Corrected:** {corrected}\n"
+            f"  **Reason:** {reason}\n"
+        )
 
-    if not rows:
-        return ""
-
-    return "\n".join([
-        "| Original | Corrected | Reason |",
-        "|---|---|---|",
-        *rows
-    ])
+    return "\n".join(out)
 
 # ============================
 # Invalid rows
