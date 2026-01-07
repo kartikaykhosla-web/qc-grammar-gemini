@@ -32,7 +32,7 @@ from docx import Document
 
 # ===================== GRAMMAR =====================
 import language_tool_python
-from language_tool_python.exceptions import RateLimitError
+
 
 # ===================== VERTEX AI =====================
 import vertexai
@@ -249,8 +249,6 @@ def correct_grammar_languagetool(text):
 
     try:
         return language_tool_python.utils.correct(text, lt_tool.check(text))
-    except RateLimitError:
-        return text
     except Exception:
         return text
 
@@ -409,6 +407,70 @@ def filter_invalid_rows(gemini_md, article_text):
         *output
     ])
 
+# ==============================================
+# Split spelling Grammar Function
+# ==============================================
+
+def split_spelling_grammar(table_md):
+    if not table_md:
+        return "", ""
+
+    rows = re.findall(
+        r"\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|",
+        table_md
+    )
+
+    spelling_rows = []
+    grammar_rows = []
+
+    for original, corrected, reason in rows:
+        if original.strip().lower() == "original":
+            continue
+
+        # Remove punctuation to compare spelling only
+        o_alpha = re.sub(r"[^a-zA-Z]", "", original)
+        c_alpha = re.sub(r"[^a-zA-Z]", "", corrected)
+
+        if o_alpha.lower() != c_alpha.lower():
+            spelling_rows.append((original, corrected, reason))
+        else:
+            grammar_rows.append((original, corrected, reason))
+
+    def build_table(rows):
+        if not rows:
+            return ""
+        return "\n".join(
+            ["| Original | Corrected | Reason |", "|---|---|---|"] +
+            [f"| {o} | {c} | {r} |" for o, c, r in rows]
+        )
+
+    return build_table(spelling_rows), build_table(grammar_rows)
+# =============================
+# Is structural Inline
+# =============================
+def is_structural_line(text: str) -> bool:
+    t = text.strip().lower()
+
+    # Headings / labels
+    if len(t.split()) <= 3:
+        return True
+
+    # Section headers
+    if any(t.startswith(x) for x in [
+        "day ",
+        "note:",
+        "about ",
+        "directed by",
+        "cast",
+    ]):
+        return True
+
+    # Lists / bullets
+    if re.match(r"^\d+[\).]", t):
+        return True
+
+    return False
+
 # =================================================
 # FACT CHECK — SECOND PASS (ADDED, ISOLATED)
 # =================================================
@@ -481,32 +543,44 @@ else:
 if article_content:
     qc_content = run_pipeline(article_content)
 
-    col1, col2 = st.columns(2)
+    # ---------- FINAL ARTICLE ----------
+    st.subheader("📄 Final Article")
+    for _, t in qc_content:
+        st.write(t)
 
-    # ---------- LEFT COLUMN ----------
-    with col1:
-        st.subheader("📄 Final Article")
-        for _, t in qc_content:
-            st.write(t)
-
-    # ---------- RIGHT COLUMN ----------
-    with col2:
-        st.subheader("🤖 Gemini QC Review")
-
-        raw = gemini_grammar_review(qc_content)
-
-        article_text = "\n".join(
-            t for c, t in article_content if c == "paragraph"
-        )
-
-        clean = filter_invalid_rows(raw, article_text)
-        st.markdown(clean)
-
-    # ---------- BELOW COLUMNS ----------
     st.divider()
 
-    if st.button("🔍 Run Fact Check (Second Pass)"):
-        st.subheader("📌 Fact Check Results")
-        st.markdown(gemini_fact_check(qc_content))
+    # ---------- GEMINI QC ----------
+    st.subheader("🤖 Gemini QC Review")
 
+    article_text = "\n".join(
+        t for c, t in article_content if c == "paragraph"
+    )
 
+    # Grammar + Spelling
+    raw = gemini_grammar_review(qc_content)
+    clean = filter_invalid_rows(raw, article_text)
+
+    spelling_table, grammar_table = split_spelling_grammar(clean)
+
+    st.markdown("### ✍️ Spelling Issues")
+    if spelling_table:
+        st.markdown(spelling_table)
+    else:
+        st.success("✅ No spelling issues found")
+
+    st.markdown("### 🧠 Grammar Issues")
+    if grammar_table:
+        st.markdown(grammar_table)
+    else:
+        st.success("✅ No grammar issues found")
+
+    # ---------- FACT CHECK ----------
+    st.markdown("### 📌 Fact Check")
+
+    fact_result = gemini_fact_check(qc_content)
+
+    if not fact_result or "| Statement |" not in fact_result:
+        st.success("✅ No factual issues found")
+    else:
+        st.markdown(fact_result)
