@@ -342,6 +342,7 @@ PLATFORM NAME SAFETY:
 Return output strictly as a table:
 | Original | Corrected | Reason |
 """
+
     combined_text = "\n\n---\n\n".join(paragraphs)
     prompt = BASE_PROMPT + "\n\nTEXT:\n" + combined_text
 
@@ -350,27 +351,33 @@ Return output strictly as a table:
     except Exception:
         return ""
 
-    # 🔧 FIX: Convert pipe-separated output into paragraphs
-    parts = [p.strip() for p in raw.split("|") if p.strip()]
+    # 🔥 HARD FIX: rebuild a real markdown table
+    cells = [c.strip() for c in raw.split("|") if c.strip()]
 
-    out = []
-    for i in range(0, len(parts), 3):
-        chunk = parts[i:i + 3]
-        if len(chunk) != 3:
+    rows = []
+    for i in range(0, len(cells), 3):
+        row = cells[i:i + 3]
+        if len(row) != 3:
             continue
 
-        original, corrected, reason = chunk
+        original, corrected, reason = row
 
+        # skip header junk
         if original.lower() == "original":
             continue
 
-        out.append(
-            f"• **Original:** {original}\n"
-            f"  **Corrected:** {corrected}\n"
-            f"  **Reason:** {reason}\n"
-        )
+        rows.append(f"| {original} | {corrected} | {reason} |")
 
-    return "\n".join(out)
+    if not rows:
+        return ""
+
+    table = [
+        "| Original | Corrected | Reason |",
+        "|---|---|---|",
+        *rows
+    ]
+
+    return "\n".join(table)
 
 # ============================
 # Invalid rows
