@@ -351,19 +351,16 @@ Return output strictly as a table:
     except Exception:
         return ""
 
-    if "|" not in raw:
-        return ""
+    # 🔧 HARD FIX: Gemini sometimes returns everything on ONE LINE
+    tokens = [t.strip() for t in raw.split("|") if t.strip()]
 
-    # 🔧 FIX: normalise Gemini pipe-stream into a real markdown table
-    cells = [c.strip() for c in raw.split("|") if c.strip()]
-
-    # Remove echoed header if Gemini repeats it
-    if cells[:3] == ["Original", "Corrected", "Reason"]:
-        cells = cells[3:]
+    # Remove echoed header if present
+    if tokens[:3] == ["Original", "Corrected", "Reason"]:
+        tokens = tokens[3:]
 
     rows = []
-    for i in range(0, len(cells), 3):
-        chunk = cells[i:i + 3]
+    for i in range(0, len(tokens), 3):
+        chunk = tokens[i:i + 3]
         if len(chunk) == 3:
             rows.append(f"| {chunk[0]} | {chunk[1]} | {chunk[2]} |")
 
