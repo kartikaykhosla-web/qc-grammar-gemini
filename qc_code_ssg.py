@@ -296,6 +296,8 @@ def gemini_grammar_review(article_data):
         for ctype, text in article_data
         if ctype == "paragraph"
     ]
+    paragraphs = list(dict.fromkeys(paragraphs))
+
 
     BASE_PROMPT = """
 You are a professional proofreader and a content QC professional.
@@ -309,6 +311,8 @@ Rules (STRICT):
 - British date format must be used (e.g., "1 January", not "January 1")
 - Date-order corrections are allowed ONLY when the numeric value remains unchanged
 - Understand context before suggesting corrections
+- If an issue exists once, it MUST be reported every time
+- List *every* spelling correction independently, even if it seems minor
 
 PROHIBITIONS:
 - NEVER change proper nouns, political parties, or person names
@@ -343,33 +347,58 @@ INLINE CONTENT SAFETY:
 PLATFORM NAME SAFETY:
 - The platform "X" must NEVER be interpreted as "A"
 
+EXHAUSTIVENESS REQUIREMENT (MANDATORY):
+- You MUST scan the entire TEXT from start to end
+- You MUST identify ALL applicable issues before responding
+- Do NOT prioritise or skip issues due to importance
+- Do NOT stop early once some issues are found
+- The output must be COMPLETE and repeatable for the same TEXT
+
 Return output strictly as a table:
 | Original | Corrected | Reason |
 """
 
-
-    responses = []
-
-    # 🔧 FIX #1 — single Gemini call to prevent inline table corruption
+    # 🔧 FIX #1 — single Gemini call
     combined_text = "\n\n---\n\n".join(paragraphs)
     prompt = BASE_PROMPT + "\n\nTEXT:\n" + combined_text
 
     try:
-        raw = model.generate_content(prompt).text
+        raw = model.generate_content(
+            prompt,
+            generation_config={
+                "temperature": 0,
+                "top_p": 1
+            }
+        ).text
     except Exception:
         return ""
 
-    # 🔧 FIX #2 — robust row extraction (handles inline | | garbage)
+    # 🔧 FIX #2 — robust row extraction + STABLE DEDUP
     matches = re.findall(
         r"\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|",
         raw
     )
 
     rows = []
+    seen = set()
+
+    def canon(s: str) -> str:
+        s = s.lower().strip()
+        s = re.sub(r"\s+", " ", s)
+        return s.strip(".,;:!?")
+
     for original, corrected, reason in matches:
         if original.strip().lower() == "original":
             continue
-        rows.append(f"| {original.strip()} | {corrected.strip()} | {reason.strip()} |")
+
+        key = (canon(original), canon(corrected), canon(reason))
+        if key in seen:
+            continue
+
+        seen.add(key)
+        rows.append(
+            f"| {original.strip()} | {corrected.strip()} | {reason.strip()} |"
+        )
 
     if not rows:
         return ""
@@ -384,33 +413,41 @@ Return output strictly as a table:
 # Invalid rows
 # ============================
 def filter_invalid_rows(gemini_md, article_text):
-    # Extract rows even if Gemini returns everything inline
-    rows = re.findall(
-        r"\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|",
-        gemini_md
-    )
+    lines = gemini_md.splitlines()
+    out = []
+    seen = set()
 
-    output = []
+    def normalise(text):
+        return re.sub(r"[^a-z0-9]", "", text.lower())
 
-    for original, corrected, reason in rows:
-        if original.strip().lower() == "original":
+    for line in lines:
+        if "|" not in line or line.strip().startswith("| Original"):
+            out.append(line)
             continue
 
+        cols = [c.strip() for c in line.split("|") if c.strip()]
+        if len(cols) != 3:
+            continue
+
+        original, corrected, reason = cols
+
+        # must exist verbatim
         if original not in article_text:
             continue
 
-        output.append(
-            f"| {original.strip()} | {corrected.strip()} | {reason.strip()} |"
+        # 🔥 FIX #1: normalised edit signature (stable dedupe)
+        key = (
+            normalise(original),
+            normalise(corrected),
         )
 
-    if not output:
-        return ""
+        if key in seen:
+            continue
 
-    return "\n".join([
-        "| Original | Corrected | Reason |",
-        "|---|---|---|",
-        *output
-    ])
+        seen.add(key)
+        out.append(f"| {original} | {corrected} | {reason} |")
+
+    return "\n".join(out)
 
 # ==============================================
 # Split spelling Grammar Function
