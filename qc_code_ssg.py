@@ -146,6 +146,7 @@ def clean_article(url):
 
     for el in soup.find_all(["p", "li"], recursive=True):
         txt = el.get_text(separator=" ", strip=True)
+
         # 🔥 FIX: remove space BEFORE punctuation introduced by HTML
         txt = re.sub(r"\s+([,.;:!?])", r"\1", txt)
 
@@ -154,8 +155,12 @@ def clean_article(url):
 
         lower = txt.lower()
 
+        # ⛔ SKIP publish / update metadata (site-agnostic)
+        if re.match(r"^(published|last updated|updated)\b.*\d{4}",lower):
+            continue
+
         # 🛑 HARD STOP → footer / legal / site boilerplate
-        if any(marker in lower for marker in HARD_STOP_MARKERS):
+        if re.search(r"\b(published|last updated|updated)\b.*\b(19|20)\d{2}\b",lower):
             break
 
         # ⛔ SKIP widget headers / navigation
@@ -173,6 +178,7 @@ def clean_article(url):
         content.append(("paragraph", txt))
 
     return content
+
 
 
 # =================================================
@@ -302,17 +308,21 @@ You are a professional proofreader and a content QC professional.
 
 Rules (STRICT):
 - Review each paragraph independently
-- Only fix spelling and grammar
-- Do NOT change numbers
-- Understand the context and suggest grammatical changes basis the context if required
+- Only fix spelling, grammar, and language-standard issues
+- Do NOT change numbers or numerical values
 - British English is the ONLY accepted standard
-- Convert American English spellings to British English where applicable
+- Convert American English spellings AND formats to British English where applicable
+- British date format must be used (e.g., "1 January", not "January 1")
+- Date-order corrections are allowed ONLY when the numeric value remains unchanged
+- Understand context before suggesting corrections
+
+PROHIBITIONS:
 - NEVER change proper nouns, political parties, or person names
 - NEVER rename quoted speakers
 - NEVER modify social media platform names or product/platform identifiers
   (e.g., X, Twitter, Facebook, Instagram)
 - NEVER modify single-letter proper nouns (e.g., X)
-- If unsure, do NOT hallucinate
+- Do NOT hallucinate
 - Do NOT normalize legal, political, or platform references
 
 CRITICAL CONSTRAINTS:
@@ -325,8 +335,8 @@ CRITICAL CONSTRAINTS:
 
 ABSOLUTE RULE:
 - Treat the TEXT as a raw byte string
-- Do NOT normalize whitespace, punctuation, or casing
-- Periods, commas, apostrophes, and abbreviations must be preserved exactly
+- Do NOT normalize whitespace beyond the correction itself
+- Periods, commas, apostrophes, abbreviations, and numerals must be preserved exactly
 
 ABBREVIATION SAFETY:
 - Single-letter abbreviations followed by a period (e.g., "S.", "X.") are VALID
@@ -342,6 +352,7 @@ PLATFORM NAME SAFETY:
 Return output strictly as a table:
 | Original | Corrected | Reason |
 """
+
 
     responses = []
 
@@ -411,40 +422,42 @@ def filter_invalid_rows(gemini_md, article_text):
 # Split spelling Grammar Function
 # ==============================================
 
-def split_spelling_grammar(table_md):
-    if not table_md:
-        return "", ""
+def split_spelling_grammar(table_md: str):
+    spelling_rows = []
+    grammar_rows = []
 
     rows = re.findall(
         r"\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|",
         table_md
     )
 
-    spelling_rows = []
-    grammar_rows = []
-
     for original, corrected, reason in rows:
-        if original.strip().lower() == "original":
+        if original.lower() == "original":
             continue
 
-        # Remove punctuation to compare spelling only
-        o_alpha = re.sub(r"[^a-zA-Z]", "", original)
-        c_alpha = re.sub(r"[^a-zA-Z]", "", corrected)
+        # 🔑 MINIMAL FIX
+        is_spelling = (
+            len(original.split()) == 1
+            and len(corrected.split()) == 1
+        )
 
-        if o_alpha.lower() != c_alpha.lower():
-            spelling_rows.append((original, corrected, reason))
+        row = f"| {original} | {corrected} | {reason} |"
+
+        if is_spelling:
+            spelling_rows.append(row)
         else:
-            grammar_rows.append((original, corrected, reason))
+            grammar_rows.append(row)
 
     def build_table(rows):
         if not rows:
             return ""
         return "\n".join(
-            ["| Original | Corrected | Reason |", "|---|---|---|"] +
-            [f"| {o} | {c} | {r} |" for o, c, r in rows]
+            ["| Original | Corrected | Reason |",
+             "|---|---|---|"] + rows
         )
 
     return build_table(spelling_rows), build_table(grammar_rows)
+
 # =============================
 # Is structural Inline
 # =============================
@@ -483,16 +496,33 @@ def gemini_fact_check(article_data):
     ]
 
     fact_prompt = f"""
-You are a strict factual verifier.
+You are an internal factual consistency auditor.
 
-Rules (STRICT):
-- ONLY check factual correctness
-- Identify statements that are factually incorrect or misleading
-- Do NOT check grammar, spelling, punctuation, or style
-- Do NOT rewrite sentences
-- Do NOT infer intent
-- If a statement is unverifiable, mark it as "Unverifiable"
-- If a statement is factually correct, DO NOT include it
+SCOPE (STRICT):
+- Treat the TEXT as a closed, self-contained document
+- Do NOT use external knowledge, memory, news, timelines, or assumptions
+- Do NOT rely on real-world verification
+- You may ONLY evaluate statements using information present in the TEXT
+
+SPAN ANCHORING (MANDATORY):
+- Only evaluate statements that appear verbatim in the TEXT
+- Quote the EXACT sentence fragment under "Statement"
+- Do NOT paraphrase, rewrite, or infer
+
+EVALUATION RULES:
+- Identify ONLY internal contradictions, misleading implications,
+  or factual inconsistencies within the TEXT
+- If a statement cannot be verified using the TEXT alone,
+  mark the Issue as "Unverifiable from article"
+- If no correcting statement exists elsewhere in the TEXT,
+  write "Not stated in article" in Correct Fact
+- NEVER invent facts, dates, announcements, or corrections
+
+DO NOT:
+- Check grammar, spelling, or style
+- Rewrite sentences
+- Introduce external facts
+- Create hypothetical corrections
 
 Return output strictly as a table:
 | Statement | Issue | Correct Fact |
@@ -500,6 +530,9 @@ Return output strictly as a table:
 TEXT:
 {chr(10).join(paragraphs)}
 """
+
+
+
 
     try:
         return model.generate_content(fact_prompt).text
