@@ -146,7 +146,6 @@ def clean_article(url):
 
     for el in soup.find_all(["p", "li"], recursive=True):
         txt = el.get_text(separator=" ", strip=True)
-
         # 🔥 FIX: remove space BEFORE punctuation introduced by HTML
         txt = re.sub(r"\s+([,.;:!?])", r"\1", txt)
 
@@ -155,12 +154,8 @@ def clean_article(url):
 
         lower = txt.lower()
 
-        # ⛔ SKIP publish / update metadata (site-agnostic)
-        if re.match(r"^(published|last updated|updated)\b.*\d{4}",lower):
-            continue
-
         # 🛑 HARD STOP → footer / legal / site boilerplate
-        if re.search(r"\b(published|last updated|updated)\b.*\b(19|20)\d{2}\b",lower):
+        if any(marker in lower for marker in HARD_STOP_MARKERS):
             break
 
         # ⛔ SKIP widget headers / navigation
@@ -178,7 +173,6 @@ def clean_article(url):
         content.append(("paragraph", txt))
 
     return content
-
 
 
 # =================================================
