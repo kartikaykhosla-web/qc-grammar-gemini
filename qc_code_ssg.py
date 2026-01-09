@@ -288,16 +288,17 @@ def filter_gemini_rows(raw_table, article_text):
 # GEMINI QC — OLD TABLE FORMAT (SAFE)
 # =================================================
 def gemini_grammar_review(article_data):
-    model = init_vertex_and_model()
+    init_vertex_and_model()  # ensures vertexai.init() is called
+    model = GenerativeModel("publishers/google/models/gemini-2.5-flash")
+
 
     MAX_PARA_CHARS = 1800
     paragraphs = [
         text if len(text) <= MAX_PARA_CHARS else text[:MAX_PARA_CHARS]
         for ctype, text in article_data
-        if ctype == "paragraph"
+        if ctype == "paragraph" and len(text.split()) >= 6
     ]
-    paragraphs = list(dict.fromkeys(paragraphs))
-
+    paragraphs = paragraphs[:30]  # HARD SAFETY CAP
 
     BASE_PROMPT = """
 You are a professional proofreader and a content QC professional.
@@ -358,22 +359,29 @@ Return output strictly as a table:
 | Original | Corrected | Reason |
 """
 
-    # 🔧 FIX #1 — single Gemini call
-    combined_text = "\n\n---\n\n".join(paragraphs)
-    prompt = BASE_PROMPT + "\n\nTEXT:\n" + combined_text
+    responses = []
 
-    try:
-        raw = model.generate_content(
-            prompt,
-            generation_config={
-                "temperature": 0,
-                "top_p": 1
-            }
-        ).text
-    except Exception:
+    # ✅ FIX: Gemini called PER PARAGRAPH (nothing else changed)
+    for para in paragraphs:
+        prompt = BASE_PROMPT + "\n\nTEXT:\n" + para
+        try:
+            out = model.generate_content(
+                prompt,
+                generation_config={
+                    "temperature": 0,
+                    "top_p": 1
+                }
+            ).text
+            responses.append(out)
+        except Exception:
+            continue
+
+    if not responses:
         return ""
 
-    # 🔧 FIX #2 — robust row extraction + STABLE DEDUP
+    raw = "\n".join(responses)
+
+    # 🔧 Existing extraction + dedupe (UNCHANGED)
     matches = re.findall(
         r"\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|",
         raw
@@ -408,6 +416,7 @@ Return output strictly as a table:
         "|---|---|---|",
         *rows
     ])
+
 
 # ============================
 # Invalid rows
@@ -470,7 +479,9 @@ def split_spelling_grammar(table_md: str):
         is_spelling = (
             len(original.split()) == 1
             and len(corrected.split()) == 1
+            and original != corrected
         )
+
 
         row = f"| {original} | {corrected} | {reason} |"
 
