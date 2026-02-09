@@ -15,6 +15,8 @@ import hashlib
 import tempfile
 import streamlit as st
 import html
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from bs4 import BeautifulSoup
 from google.oauth2 import service_account
 from difflib import SequenceMatcher
@@ -199,7 +201,7 @@ def load_nlp():
 @st.cache_resource
 def load_languagetool():
     try:
-        return language_tool_python.LanguageToolPublicAPI("en-US")
+        return language_tool_python.LanguageToolPublicAPI("en-GB")
     except Exception:
         return None
 
@@ -227,6 +229,406 @@ STOPWORDS = {
     "a","an","the","of","to","in","on","at","for","from","by",
     "and","or","but","so","are","is","was","were","be","been","being"
 }
+
+GRAMMAR_MAX_CHARS = 20000
+FACT_MAX_CHARS = 20000
+FACT_MAX_ITEMS = 40
+
+# =================================================
+# EDITORIAL QC RULES (NEW)
+# =================================================
+US_UK_SPELLINGS = {
+    "organize": "organise",
+    "organizes": "organises",
+    "organized": "organised",
+    "organizing": "organising",
+    "organization": "organisation",
+    "analyze": "analyse",
+    "analyzes": "analyses",
+    "analyzed": "analysed",
+    "analyzing": "analysing",
+    "center": "centre",
+    "color": "colour",
+    "colors": "colours",
+    "favor": "favour",
+    "favored": "favoured",
+    "favorite": "favourite",
+    "behavior": "behaviour",
+    "defense": "defence",
+    "license": "licence",
+    "offense": "offence",
+    "traveling": "travelling",
+    "traveled": "travelled",
+    "canceled": "cancelled",
+    "counseling": "counselling",
+    "program": "programme",
+    "gray": "grey",
+}
+
+HYPERBOLE_WORDS = [
+    "best",
+    "awesome",
+    "amazing",
+    "incredible",
+    "mind-blowing",
+    "unbelievable",
+    "stunning",
+    "ultimate",
+    "perfect",
+    "must-see",
+    "must watch",
+]
+
+CLICHE_PHRASES = [
+    "on the other hand",
+    "moreover",
+    "in this regard",
+    "do the needful",
+    "at the end of the day",
+    "in a nutshell",
+]
+
+URL_RE = re.compile(r"\b(?:https?://|www\.)\S+\b", re.IGNORECASE)
+ACRONYM_DOT_RE = re.compile(r"\b(?:[A-Z]\.\s?){2,}\b")
+HONORIFIC_RE = re.compile(r"\b(Mr|Mrs|Ms)\.?\b")
+HONOURS_PREFIX_RE = re.compile(
+    r"\b(Bharat Ratna|Padma (?:Shri|Bhushan|Vibhushan))\s+([A-Z][\w'-]+)\b"
+)
+AGE_NO_HYPHEN_RE = re.compile(
+    r"\b(\d{1,3})\s*(?:year|yr|yrs)\s*old\b", re.IGNORECASE
+)
+AGE_BAD_HYPHEN_RE = re.compile(r"\b(\d{1,3})-year\s+old\b", re.IGNORECASE)
+RANGE_RE = re.compile(r"\b[0-9]\s*[–-]\s*[0-9]\b")
+UNIT_RE = re.compile(
+    r"\b(\d+(?:\.\d+)?)\s*(kg|kgs|KG|KGS|km|kms|KM|KMS|kmph|KMPH|KMPh|km/h|KM/H)\b"
+)
+LIST_ENUM_RE = re.compile(r"^\s*\(?\d+[.)]")
+LEGAL_CONTEXT_RE = re.compile(
+    r"\b(section|sec\.?|article|art\.?|rule|order|clause|schedule|"
+    r"sub-?section|sub-?clause|act|ipc|crpc|bnss|bns|cpc)\b",
+    re.IGNORECASE
+)
+LEGAL_REF_RE = re.compile(r"\b\d+\s*\(\d+\)\b")
+DATE_TIME_RE = re.compile(
+    r"\b(\d{1,2}:\d{2}\s*(?:am|pm)?)\b|\b\d{1,2}\s+[A-Za-z]{3,9}\b",
+    re.IGNORECASE
+)
+DGMENT_RE = re.compile(r"\b[A-Za-z]*dgment(s)?\b")
+QUOTE_RE = re.compile(r"[\"“”]")
+EXPERT_HINT_RE = re.compile(
+    r"\b(Dr|Doctor|Professor|expert|dermatologist|nutritionist|dietitian|doctor|"
+    r"physician|surgeon|psychologist|cardiologist|gynecologist|gynaecologist|"
+    r"paediatrician|pediatrician|dentist|trichologist)\b",
+    re.IGNORECASE
+)
+
+HYPERBOLE_RE = re.compile(
+    r"\b(" + "|".join(re.escape(w) for w in HYPERBOLE_WORDS) + r")\b",
+    re.IGNORECASE
+)
+CLICHE_RE = re.compile(
+    r"\b(" + "|".join(re.escape(p) for p in CLICHE_PHRASES) + r")\b",
+    re.IGNORECASE
+)
+
+UNIT_NORMALIZATION = {
+    "kg": "kg",
+    "kgs": "kg",
+    "km": "km",
+    "kms": "km",
+    "kmph": "kmph",
+    "km/h": "km/h",
+}
+
+
+def _preserve_case(source, replacement):
+    if source.isupper():
+        return replacement.upper()
+    if source[:1].isupper():
+        return replacement.capitalize()
+    return replacement
+
+
+def _excerpt(text, start, end, width=40):
+    left = max(0, start - width)
+    right = min(len(text), end + width)
+    snippet = text[left:right].replace("\n", " ").strip()
+    return snippet
+
+
+def _escape_md(text):
+    return text.replace("|", "\\|").replace("\n", " ").strip()
+
+
+def _render_issues_table(issues):
+    if not issues:
+        return ""
+    lines = [
+        "| Rule | Location | Excerpt | Suggestion |",
+        "| --- | --- | --- | --- |",
+    ]
+    for issue in issues:
+        rule = _escape_md(issue.get("rule", ""))
+        location = _escape_md(issue.get("location", ""))
+        excerpt = _escape_md(issue.get("excerpt", ""))[:160]
+        suggestion = _escape_md(issue.get("suggestion", ""))
+        lines.append(f"| {rule} | {location} | {excerpt} | {suggestion} |")
+    return "\n".join(lines)
+
+
+def _batch_texts(texts, max_chars):
+    batches = []
+    current = []
+    size = 0
+
+    for text in texts:
+        t = text.strip()
+        if not t:
+            continue
+        add_len = len(t) + 2
+        if current and size + add_len > max_chars:
+            batches.append("\n\n".join(current))
+            current = [t]
+            size = len(t)
+        else:
+            current.append(t)
+            size += add_len
+
+    if current:
+        batches.append("\n\n".join(current))
+
+    return batches
+
+
+def _batch_statements(statements, max_chars, max_items):
+    batches = []
+    current = []
+    size = 0
+
+    for stmt in statements:
+        line = f"- {stmt}"
+        add_len = len(line) + 1
+        if current and (size + add_len > max_chars or len(current) >= max_items):
+            batches.append(current)
+            current = [stmt]
+            size = add_len
+        else:
+            current.append(stmt)
+            size += add_len
+
+    if current:
+        batches.append(current)
+
+    return batches
+
+
+def editorial_qc_checks(content, web_story=False, health_beauty=False):
+    issues = []
+    seen_issues = set()
+    paragraph_index = 0
+    found_expert_quote = False
+
+    def add_issue(rule, location, excerpt, suggestion):
+        key = (
+            rule,
+            location,
+            re.sub(r"\s+", " ", excerpt.strip().lower())
+        )
+        if key in seen_issues:
+            return
+        seen_issues.add(key)
+        issues.append({
+            "rule": rule,
+            "location": location,
+            "excerpt": excerpt,
+            "suggestion": suggestion,
+        })
+
+    for ctype, text in content:
+        if not text:
+            continue
+
+        if ctype == "paragraph":
+            paragraph_index += 1
+            location = f"Paragraph {paragraph_index}"
+        else:
+            location = "Heading"
+
+        doc = nlp(text)
+        entity_spans = [(ent.start_char, ent.end_char) for ent in doc.ents]
+
+        def in_entity(start, end):
+            return any(start >= s and end <= e for s, e in entity_spans)
+
+        # British English spellings (skip official names/entities)
+        for us, uk in US_UK_SPELLINGS.items():
+            for match in re.finditer(rf"\b{re.escape(us)}\b", text, re.IGNORECASE):
+                if in_entity(match.start(), match.end()):
+                    continue
+                suggestion = _preserve_case(match.group(), uk)
+                add_issue(
+                    "British English spelling",
+                    location,
+                    _excerpt(text, match.start(), match.end()),
+                    f"Use '{suggestion}'"
+                )
+
+        # British English: -dgment -> -dgement (dynamic, not hardcoded)
+        for match in DGMENT_RE.finditer(text):
+            if in_entity(match.start(), match.end()):
+                continue
+            word = match.group(0)
+            if "dgement" in word.lower():
+                continue
+            suggestion = re.sub(r"dgment(s)?$", r"dgement\1", word, flags=re.IGNORECASE)
+            suggestion = _preserve_case(word, suggestion)
+            add_issue(
+                "British English spelling",
+                location,
+                _excerpt(text, match.start(), match.end()),
+                f"Use '{suggestion}'"
+            )
+
+        # No ampersands unless part of an official name/entity
+        for match in re.finditer(r"&", text):
+            if in_entity(match.start(), match.end()):
+                continue
+            add_issue(
+                "No ampersands",
+                location,
+                _excerpt(text, match.start(), match.end()),
+                "Replace '&' with 'and'"
+            )
+
+        # Numerals 0-9 in body text (headlines and ranges allowed)
+        if ctype == "paragraph":
+            range_spans = [(m.start(), m.end()) for m in RANGE_RE.finditer(text)]
+            for match in re.finditer(r"\b[0-9]\b", text):
+                # Skip list numbering at the start of a line
+                if match.start() <= 3 and LIST_ENUM_RE.match(text):
+                    continue
+                # Skip legal references and section/article numbering
+                left = max(0, match.start() - 20)
+                right = min(len(text), match.end() + 20)
+                context = text[left:right]
+                if LEGAL_CONTEXT_RE.search(context) or LEGAL_REF_RE.search(context):
+                    continue
+                # Skip dates and times
+                if DATE_TIME_RE.search(context):
+                    continue
+                if any(match.start() >= s and match.end() <= e for s, e in range_spans):
+                    continue
+                add_issue(
+                    "Number style (0–9)",
+                    location,
+                    _excerpt(text, match.start(), match.end()),
+                    "Spell out numbers 0–9 in body text"
+                )
+
+        # Measurement units: lowercase, singular
+        for match in UNIT_RE.finditer(text):
+            number = match.group(1)
+            unit_raw = match.group(2)
+            unit_key = unit_raw.lower()
+            if unit_key not in UNIT_NORMALIZATION:
+                continue
+            corrected_unit = UNIT_NORMALIZATION[unit_key]
+            if unit_raw != corrected_unit:
+                add_issue(
+                    "Unit formatting",
+                    location,
+                    _excerpt(text, match.start(), match.end()),
+                    f"Use '{number} {corrected_unit}'"
+                )
+
+        # Acronyms should not include periods/spaces
+        for match in ACRONYM_DOT_RE.finditer(text):
+            cleaned = re.sub(r"[.\s]", "", match.group())
+            add_issue(
+                "Acronym punctuation",
+                location,
+                _excerpt(text, match.start(), match.end()),
+                f"Use '{cleaned}'"
+            )
+
+        # Hyperlinks: none in first two paragraphs; none at all for web stories
+        if URL_RE.search(text):
+            if web_story or (ctype == "paragraph" and paragraph_index <= 2):
+                add_issue(
+                    "Hyperlink placement",
+                    location,
+                    _excerpt(text, 0, min(len(text), 80)),
+                    "Remove hyperlinks (web story)" if web_story
+                    else "Avoid external hyperlinks in the first two paragraphs"
+                )
+
+        # Hyperbole and cliches
+        for match in HYPERBOLE_RE.finditer(text):
+            add_issue(
+                "Avoid superlatives",
+                location,
+                _excerpt(text, match.start(), match.end()),
+                "Remove or substantiate the claim"
+            )
+        for match in CLICHE_RE.finditer(text):
+            add_issue(
+                "Avoid cliches",
+                location,
+                _excerpt(text, match.start(), match.end()),
+                "Rephrase in a fresh, direct way"
+            )
+
+        # Honorifics
+        for match in HONORIFIC_RE.finditer(text):
+            add_issue(
+                "Honorifics",
+                location,
+                _excerpt(text, match.start(), match.end()),
+                "Remove Mr/Mrs/Ms"
+            )
+
+        # Honours as suffixes
+        for match in HONOURS_PREFIX_RE.finditer(text):
+            award = match.group(1)
+            name = match.group(2)
+            add_issue(
+                "Honours as suffix",
+                location,
+                _excerpt(text, match.start(), match.end()),
+                f"Use '{award} awardee {name}'"
+            )
+
+        # Age formatting
+        for match in AGE_BAD_HYPHEN_RE.finditer(text):
+            add_issue(
+                "Age formatting",
+                location,
+                _excerpt(text, match.start(), match.end()),
+                "Use '38-year-old' or 'Name, 38,'"
+            )
+        for match in AGE_NO_HYPHEN_RE.finditer(text):
+            if re.search(rf"\b{match.group(1)}-year-old\b", text, re.IGNORECASE):
+                continue
+            add_issue(
+                "Age formatting",
+                location,
+                _excerpt(text, match.start(), match.end()),
+                "Use '38-year-old' or 'Name, 38,'"
+            )
+
+        # Expert quote detection (health/beauty)
+        if health_beauty and QUOTE_RE.search(text) and EXPERT_HINT_RE.search(text):
+            found_expert_quote = True
+
+    if health_beauty and not found_expert_quote:
+        add_issue(
+            "Expert quote required",
+            "Overall",
+            "No expert quote detected",
+            "Add a quote from a relevant expert"
+        )
+
+    return issues
 
 
 def correct_spelling_minimal(text):
@@ -300,18 +702,23 @@ def filter_gemini_rows(raw_table, article_text):
 # =================================================
 # GEMINI QC — OLD TABLE FORMAT (SAFE)
 # =================================================
-def gemini_grammar_review(article_data):
+def gemini_grammar_review(article_data, max_chars=GRAMMAR_MAX_CHARS):
     init_vertex_and_model()  # ensures vertexai.init() is called
-    model = GenerativeModel("publishers/google/models/gemini-2.5-flash")
 
-
-    MAX_PARA_CHARS = 1800
-    paragraphs = [
-        text if len(text) <= MAX_PARA_CHARS else text[:MAX_PARA_CHARS]
+    raw_paragraphs = [
+        text
         for ctype, text in article_data
         if ctype == "paragraph" and len(text.split()) >= 6
     ]
-    paragraphs = paragraphs[:30]  # HARD SAFETY CAP
+
+    if not raw_paragraphs:
+        return ""
+
+    joined = "\n\n".join(raw_paragraphs)
+    if len(joined) <= max_chars:
+        paragraphs = [joined]
+    else:
+        paragraphs = _batch_texts(raw_paragraphs, max_chars)
 
     BASE_PROMPT = """
 You are a professional proofreader and a content QC professional.
@@ -402,20 +809,30 @@ Return output strictly as a table:
 
     responses = []
 
-    # ✅ FIX: Gemini called PER PARAGRAPH (nothing else changed)
-    for para in paragraphs:
-        prompt = BASE_PROMPT + "\n\nTEXT:\n" + para
-        try:
-            out = model.generate_content(
-                prompt,
-                generation_config={
-                    "temperature": 0,
-                    "top_p": 1
-                }
-            ).text
-            responses.append(out)
-        except Exception:
-            continue
+    def call_gemini(prompt):
+        model = GenerativeModel("publishers/google/models/gemini-2.5-flash")
+        return model.generate_content(
+            prompt,
+            generation_config={
+                "temperature": 0,
+                "top_p": 1,
+                "top_k": 1,
+                "candidate_count": 1
+            }
+        ).text
+
+    # Parallel batch calls for speed (same logic/output)
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures = []
+        for para in paragraphs:
+            prompt = BASE_PROMPT + "\n\nTEXT:\n" + para
+            futures.append(executor.submit(call_gemini, prompt))
+
+        for future in as_completed(futures):
+            try:
+                responses.append(future.result())
+            except Exception:
+                continue
 
     if not responses:
         return ""
@@ -457,6 +874,98 @@ Return output strictly as a table:
         "|---|---|---|",
         *rows
     ])
+
+
+# =================================================
+# GEMINI EDITORIAL QC — GUIDELINES
+# =================================================
+def gemini_editorial_review(article_data, web_story=False, health_beauty=False):
+    init_vertex_and_model()
+    model = GenerativeModel("publishers/google/models/gemini-2.5-flash")
+
+    paragraphs = [
+        text[:900]
+        for ctype, text in article_data
+        if ctype == "paragraph"
+    ]
+
+    joined_paragraphs = "\n\n".join(paragraphs)
+
+    context_notes = []
+    if web_story:
+        context_notes.append("- This is a web story: no hyperlinks are allowed.")
+    if health_beauty:
+        context_notes.append(
+            "- This is a health/beauty story: include at least one expert quote."
+        )
+    extra_context = "\n".join(context_notes)
+
+    prompt = f"""
+You are an editorial QC reviewer. Identify only clear violations and keep fixes concise.
+
+Rules:
+1) British English spellings only (e.g., organise). Keep official names as-is.
+2) No ampersands unless part of an official title.
+3) Single quotes for titles; double quotes only for direct speech or press releases.
+4) Use Oxford comma where needed for clarity.
+5) Units: lowercase and singular (kg, km, kmph/km/h). No "kgs"/"kms".
+6) Acronyms without periods or spaces (US, not U.S.).
+7) No external hyperlinks in the first two paragraphs. Web stories: no hyperlinks at all.
+8) Avoid superlatives/hyperbole and cliches. Avoid redundancy.
+9) Seasons: use singular terms; "rains" only for the entire season.
+10) Honorifics: no Mr/Mrs/Ms. Dr/Prof acceptable for doctors/professors.
+11) Honours as suffixes (e.g., "Bharat Ratna awardee [Name]").
+12) Age format: "[Name], 38," or "38-year-old [Name]".
+13) Use man/woman for 18+, boy/girl for 17 and under; minor/juvenile only in legal context.
+14) Health/beauty stories must include an expert quote.
+15) Provide due credit for data and avoid plagiarism.
+16) AI tools may assist but must not be the primary writing source.
+
+Context:
+{extra_context if extra_context else "- No extra context."}
+
+Return output strictly as a markdown table:
+| Issue | Location | Suggestion |
+
+If there are no issues, return exactly one row:
+| No issues found | - | - |
+
+TEXT:
+{joined_paragraphs}
+"""
+
+    response = model.generate_content(
+        prompt,
+        generation_config={
+            "temperature": 0,
+            "top_p": 1,
+            "top_k": 1,
+            "candidate_count": 1
+        }
+    )
+
+    try:
+        return response.text
+    except Exception:
+        return response.candidates[0].content.parts[0].text
+
+
+# =================================================
+# CACHED GEMINI WRAPPERS (STABLE OUTPUTS)
+# =================================================
+@st.cache_data(show_spinner=False)
+def cached_gemini_grammar_review(article_data, max_chars=GRAMMAR_MAX_CHARS):
+    return gemini_grammar_review(article_data, max_chars)
+
+
+@st.cache_data(show_spinner=False)
+def cached_gemini_editorial_review(article_data, web_story=False, health_beauty=False):
+    return gemini_editorial_review(article_data, web_story, health_beauty)
+
+
+@st.cache_data(show_spinner=False)
+def cached_gemini_fact_check(article_data, max_chars=FACT_MAX_CHARS, max_items=FACT_MAX_ITEMS):
+    return gemini_fact_check(article_data, max_chars, max_items)
 
 
 # ============================
@@ -530,6 +1039,15 @@ def split_spelling_grammar(table_md: str):
             spelling_rows.append(row)
         else:
             grammar_rows.append(row)
+
+    def sort_key(row):
+        cols = [c.strip() for c in row.split("|") if c.strip()]
+        if len(cols) != 3:
+            return ("", "", "")
+        return tuple(re.sub(r"\W+", "", c.lower()) for c in cols)
+
+    spelling_rows.sort(key=sort_key)
+    grammar_rows.sort(key=sort_key)
 
     def build_table(rows):
         if not rows:
@@ -617,7 +1135,7 @@ def chunked(lst, size):
 # =================================================
 # FACT CHECK — SECOND PASS (FAST, STREAMING, STABLE)
 # =================================================
-def gemini_fact_check(article_data):
+def gemini_fact_check(article_data, max_chars=FACT_MAX_CHARS, max_items=FACT_MAX_ITEMS):
     model = init_vertex_and_model()
 
     # 1️⃣ Deterministic statement universe
@@ -630,22 +1148,14 @@ def gemini_fact_check(article_data):
         text for ctype, text in article_data if ctype == "paragraph"
     )
 
-    # Batching config (KEY PERFORMANCE FIX)
-    BATCH_SIZE = 5
-
-    def chunked(lst, size):
-        for i in range(0, len(lst), size):
-            yield lst[i:i + size]
+    batches = _batch_statements(statements, max_chars, max_items)
 
     rows = []
     seen = set()
 
-    # 2️⃣ Batched + streaming Gemini calls
-    for batch in chunked(statements, BATCH_SIZE):
-
+    def call_batch(batch):
         batch_block = "\n".join(f"- {stmt}" for stmt in batch)
 
-        # ❗ PROMPT TEXT — UNCHANGED IN LOGIC
         fact_prompt = f"""
 You are an internal factual consistency auditor.
 
@@ -690,7 +1200,9 @@ STATEMENTS:
                 fact_prompt,
                 generation_config={
                     "temperature": 0,
-                    "top_p": 1
+                    "top_p": 1,
+                    "top_k": 1,
+                    "candidate_count": 1
                 },
                 stream=True
             )
@@ -700,9 +1212,22 @@ STATEMENTS:
                 if hasattr(chunk, "text") and chunk.text:
                     chunks.append(chunk.text)
 
-            out = "".join(chunks)
-
+            return "".join(chunks)
         except Exception:
+            return ""
+
+    # 2️⃣ Batched + streaming Gemini calls (parallel)
+    batch_results = []
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures = [executor.submit(call_batch, batch) for batch in batches]
+        for future in as_completed(futures):
+            try:
+                batch_results.append(future.result())
+            except Exception:
+                continue
+
+    for out in batch_results:
+        if not out:
             continue
 
         # 3️⃣ Extract table rows (UNCHANGED)
@@ -724,21 +1249,29 @@ STATEMENTS:
                 continue
 
             seen.add(sig)
-            rows.append(
-                f"| {s.strip()} | {issue.strip()} | {correction.strip()} |"
-            )
-
-        # ⚡ Early exit if enough issues found (optional safety)
-        if len(seen) >= 10:
-            break
+            rows.append((s.strip(), issue.strip(), correction.strip()))
 
     if not rows:
         return ""
 
+    def sort_key(row):
+        return (
+            re.sub(r"\W+", "", row[0].lower()),
+            re.sub(r"\W+", "", row[1].lower()),
+            re.sub(r"\W+", "", row[2].lower()),
+        )
+
+    rows.sort(key=sort_key)
+
+    rendered = [
+        f"| {s} | {issue} | {correction} |"
+        for s, issue, correction in rows
+    ]
+
     return "\n".join([
         "| Statement | Issue | Correct Fact |",
         "|---|---|---|",
-        *rows
+        *rendered
     ])
 
 
@@ -763,21 +1296,79 @@ def run_pipeline(content):
 st.sidebar.header("Input")
 source = st.sidebar.radio("Source", ["URL", "DOCX"])
 
+st.sidebar.header("QC Options")
+web_story = st.sidebar.checkbox("Web story (no hyperlinks)", value=False)
+health_beauty = st.sidebar.checkbox(
+    "Health/Beauty story (expert quote required)", value=False
+)
+run_gemini_editorial = st.sidebar.checkbox(
+    "Run Gemini editorial QC", value=True
+)
+if st.sidebar.button("Clear cached AI outputs"):
+    st.cache_data.clear()
+    for key in (
+        "analysis_results",
+        "analysis_key",
+        "analysis_start",
+        "article_content",
+        "input_key",
+    ):
+        st.session_state.pop(key, None)
+
+analyze_clicked = st.sidebar.button("Analyze")
+
 article_content = None
+current_key = None
 
 if source == "URL":
     url = st.sidebar.text_input("Article URL")
-    if st.sidebar.button("Analyze") and url:
+    if url:
+        current_key = f"url:{url.strip()}"
+    if analyze_clicked and url:
         article_content = clean_article(url)
+        st.session_state["article_content"] = article_content
+        st.session_state["input_key"] = current_key
 else:
     uploaded = st.sidebar.file_uploader("Upload DOCX", type=["docx"])
     if uploaded:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as f:
-            f.write(uploaded.read())
-            article_content = clean_docx(f.name)
+        file_bytes = uploaded.getvalue()
+        current_key = "docx:" + hashlib.sha256(file_bytes).hexdigest()
+        if analyze_clicked:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as f:
+                f.write(file_bytes)
+                article_content = clean_docx(f.name)
+            st.session_state["article_content"] = article_content
+            st.session_state["input_key"] = current_key
 
-if article_content:
+if article_content is None:
+    if current_key and st.session_state.get("input_key") == current_key:
+        article_content = st.session_state.get("article_content")
+
+analysis_key = None
+if current_key:
+    analysis_key = hashlib.sha256(
+        f"{current_key}|{web_story}|{health_beauty}|{run_gemini_editorial}".encode("utf-8")
+    ).hexdigest()
+
+analysis_ready = False
+if article_content and analysis_key:
+    if analyze_clicked:
+        if st.session_state.get("analysis_key") != analysis_key:
+            st.session_state["analysis_key"] = analysis_key
+            st.session_state["analysis_results"] = {}
+            st.session_state["analysis_start"] = time.perf_counter()
+        else:
+            st.info("Using cached results. Clear cached AI outputs to refresh.")
+    if st.session_state.get("analysis_key") == analysis_key:
+        analysis_ready = True
+    else:
+        st.info("Input or options changed. Click Analyze to refresh.")
+
+if analysis_ready:
     qc_content = run_pipeline(article_content)
+    results = st.session_state.setdefault("analysis_results", {})
+    if "analysis_start" not in results:
+        results["analysis_start"] = st.session_state.get("analysis_start", time.perf_counter())
 
     # ---------- FINAL ARTICLE ----------
     st.subheader("📄 Final Article")
@@ -792,31 +1383,109 @@ if article_content:
     article_text = "\n".join(
         t for c, t in article_content if c == "paragraph"
     )
-
-    # Grammar + Spelling
-    raw = gemini_grammar_review(qc_content)
-    clean = filter_invalid_rows(raw, article_text)
-
-    spelling_table, grammar_table = split_spelling_grammar(clean)
-
+    # Grammar + Spelling placeholders
     st.markdown("### ✍️ Spelling Issues")
-    if spelling_table:
-        st.markdown(spelling_table)
-    else:
-        st.success("✅ No spelling issues found")
-
+    spelling_placeholder = st.empty()
     st.markdown("### 🧠 Grammar Issues")
-    if grammar_table:
-        st.markdown(grammar_table)
-    else:
-        st.success("✅ No grammar issues found")
+    grammar_placeholder = st.empty()
+
+    editorial_placeholder = None
+    if run_gemini_editorial:
+        st.markdown("### 🧠 Gemini Editorial Review")
+        editorial_placeholder = st.empty()
 
     # ---------- FACT CHECK ----------
     st.markdown("### 📌 Fact Check")
+    fact_placeholder = st.empty()
 
-    fact_result = gemini_fact_check(qc_content)
+    def render_grammar(raw_text):
+        clean = filter_invalid_rows(raw_text, article_text)
+        spelling_table, grammar_table = split_spelling_grammar(clean)
+        if spelling_table:
+            spelling_placeholder.markdown(spelling_table)
+        else:
+            spelling_placeholder.success("✅ No spelling issues found")
+        if grammar_table:
+            grammar_placeholder.markdown(grammar_table)
+        else:
+            grammar_placeholder.success("✅ No grammar issues found")
 
-    if not fact_result or "| Statement |" not in fact_result:
-        st.success("✅ No factual issues found")
+    def render_fact(fact_text):
+        if not fact_text or "| Statement |" not in fact_text:
+            fact_placeholder.success("✅ No factual issues found")
+        else:
+            fact_placeholder.markdown(fact_text)
+
+    # Show cached results if present
+    if "grammar_raw" in results:
+        render_grammar(results["grammar_raw"])
     else:
-        st.markdown(fact_result)
+        spelling_placeholder.info("Running Gemini grammar/spelling...")
+        grammar_placeholder.info("Running Gemini grammar/spelling...")
+
+    if run_gemini_editorial:
+        if "gemini_editorial" in results:
+            editorial_placeholder.markdown(results["gemini_editorial"])
+        else:
+            editorial_placeholder.info("Running Gemini editorial QC...")
+
+    if "fact_result" in results:
+        render_fact(results["fact_result"])
+    else:
+        fact_placeholder.info("Running Gemini fact check...")
+
+    # Run missing AI tasks in parallel
+    tasks = {}
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        if "grammar_raw" not in results:
+            tasks[executor.submit(
+                cached_gemini_grammar_review,
+                qc_content,
+                GRAMMAR_MAX_CHARS
+            )] = "grammar"
+        if run_gemini_editorial and "gemini_editorial" not in results:
+            tasks[executor.submit(
+                cached_gemini_editorial_review,
+                qc_content,
+                web_story,
+                health_beauty
+            )] = "editorial"
+        if "fact_result" not in results:
+            tasks[executor.submit(
+                cached_gemini_fact_check,
+                qc_content,
+                FACT_MAX_CHARS,
+                FACT_MAX_ITEMS
+            )] = "fact"
+
+        for future in as_completed(tasks):
+            key = tasks[future]
+            try:
+                result = future.result()
+            except Exception as exc:
+                result = f"Error: {exc}"
+
+            if key == "grammar":
+                results["grammar_raw"] = result
+                render_grammar(result)
+            elif key == "editorial":
+                results["gemini_editorial"] = result
+                if editorial_placeholder:
+                    editorial_placeholder.markdown(result)
+            elif key == "fact":
+                results["fact_result"] = result
+                render_fact(result)
+
+    required_keys = {"grammar_raw", "fact_result"}
+    if run_gemini_editorial:
+        required_keys.add("gemini_editorial")
+
+    if "elapsed" not in results and required_keys.issubset(results.keys()):
+        results["elapsed"] = time.perf_counter() - results["analysis_start"]
+
+    elapsed = results.get("elapsed")
+    if elapsed is not None:
+        minutes = int(elapsed // 60)
+        seconds = int(round(elapsed % 60))
+        st.caption(f"⏱️ Time taken: {minutes}m {seconds:02d}s")
+        st.sidebar.metric("Time taken", f"{minutes}m {seconds:02d}s")
