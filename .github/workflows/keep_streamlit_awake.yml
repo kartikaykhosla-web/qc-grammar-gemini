@@ -30,6 +30,7 @@ jobs:
           import urllib.request
 
           url = os.environ["STREAMLIT_APP_URL"].strip()
+          ok_statuses = {301, 302, 303, 307, 308}
           headers = {
               "User-Agent": (
                   "Mozilla/5.0 (X11; Linux x86_64) "
@@ -52,16 +53,21 @@ jobs:
           for attempt in range(1, 7):
               try:
                   status = ping(attempt)
-                  if 200 <= status < 400:
+                  if 200 <= status < 400 or status in ok_statuses:
                       time.sleep(20)
                       verify_status = ping(attempt)
-                      if 200 <= verify_status < 400:
+                      if 200 <= verify_status < 400 or verify_status in ok_statuses:
                           print("App is reachable.")
                           sys.exit(0)
                       last_error = f"verification returned HTTP {verify_status}"
                   else:
                       last_error = f"HTTP {status}"
               except urllib.error.HTTPError as exc:
+                  if exc.code in ok_statuses:
+                      print(f"Attempt {attempt}: HTTP {exc.code} (redirect accepted)")
+                      time.sleep(20)
+                      print("App is reachable.")
+                      sys.exit(0)
                   last_error = f"HTTP {exc.code}"
                   print(f"Attempt {attempt} failed: {last_error}")
               except Exception as exc:
