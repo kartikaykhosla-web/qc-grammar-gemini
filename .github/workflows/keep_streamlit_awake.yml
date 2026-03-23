@@ -18,21 +18,58 @@ jobs:
             exit 1
           fi
 
-      - name: Ping Streamlit app
+      - name: Wake and verify Streamlit app
         env:
           STREAMLIT_APP_URL: ${{ vars.STREAMLIT_APP_URL }}
+        shell: python
         run: |
-          curl --fail --silent --show-error --location \
-            --max-time 60 \
-            --retry 3 \
-            "$STREAMLIT_APP_URL" > /dev/null
+          import os
+          import sys
+          import time
+          import urllib.error
+          import urllib.request
 
-      - name: Warm follow-up ping
-        env:
-          STREAMLIT_APP_URL: ${{ vars.STREAMLIT_APP_URL }}
-        run: |
-          sleep 20
-          curl --fail --silent --show-error --location \
-            --max-time 60 \
-            --retry 3 \
-            "$STREAMLIT_APP_URL" > /dev/null
+          url = os.environ["STREAMLIT_APP_URL"].strip()
+          headers = {
+              "User-Agent": (
+                  "Mozilla/5.0 (X11; Linux x86_64) "
+                  "AppleWebKit/537.36 (KHTML, like Gecko) "
+                  "Chrome/123.0.0.0 Safari/537.36"
+              ),
+              "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+              "Cache-Control": "no-cache",
+          }
+
+          def ping(attempt: int) -> int:
+              request = urllib.request.Request(url, headers=headers)
+              with urllib.request.urlopen(request, timeout=90) as response:
+                  status = getattr(response, "status", response.getcode())
+                  print(f"Attempt {attempt}: HTTP {status}")
+                  response.read(2048)
+                  return status
+
+          last_error = None
+          for attempt in range(1, 7):
+              try:
+                  status = ping(attempt)
+                  if 200 <= status < 400:
+                      time.sleep(20)
+                      verify_status = ping(attempt)
+                      if 200 <= verify_status < 400:
+                          print("App is reachable.")
+                          sys.exit(0)
+                      last_error = f"verification returned HTTP {verify_status}"
+                  else:
+                      last_error = f"HTTP {status}"
+              except urllib.error.HTTPError as exc:
+                  last_error = f"HTTP {exc.code}"
+                  print(f"Attempt {attempt} failed: {last_error}")
+              except Exception as exc:
+                  last_error = str(exc)
+                  print(f"Attempt {attempt} failed: {last_error}")
+
+              if attempt < 6:
+                  time.sleep(30)
+
+          print(f"Ping failed after retries: {last_error}")
+          sys.exit(1)
