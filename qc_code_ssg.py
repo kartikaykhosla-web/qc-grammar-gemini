@@ -38,9 +38,9 @@ from docx import Document
 import language_tool_python
 
 
-# ===================== VERTEX AI =====================
-import vertexai
-from vertexai.generative_models import GenerativeModel
+# ===================== GEN AI CLIENT =====================
+from google import genai
+from google.genai import types as genai_types
 
 
 # =================================================
@@ -57,6 +57,9 @@ st.caption("Spelling · Grammar · Editorial Safety · AI Review")
 PROJECT_ID = "prod-project-jnm-smart-cms"
 REGION = "us-central1"
 CRED_PATH = "/tmp/gcp_service_account.json"
+MODEL_PRO = "gemini-2.5-pro"
+MODEL_FLASH = "gemini-2.5-flash"
+CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
 
 
 def load_gcp_credentials():
@@ -78,13 +81,17 @@ def load_gcp_credentials():
         json.dump(creds_dict, f)
 
     os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = CRED_PATH
-    return service_account.Credentials.from_service_account_info(creds_dict)
+    return service_account.Credentials.from_service_account_info(
+        creds_dict,
+        scopes=[CLOUD_PLATFORM_SCOPE],
+    )
 
 @st.cache_resource
 def init_vertex_and_model():
     creds = load_gcp_credentials()
 
-    vertexai.init(
+    client = genai.Client(
+        vertexai=True,
         project=PROJECT_ID,
         location=REGION,
         credentials=creds,
@@ -92,22 +99,63 @@ def init_vertex_and_model():
 
     # Try pro, fallback to flash
     try:
-        model = GenerativeModel("publishers/google/models/gemini-2.5-pro")
+        client.models.generate_content(
+            model=MODEL_PRO,
+            contents="Warmup",
+            config=genai_types.GenerateContentConfig(
+                temperature=0,
+                topP=1,
+                maxOutputTokens=8,
+            ),
+        )
         st.success("✅ Gemini 2.5 Pro loaded")
+        default_model = MODEL_PRO
     except Exception:
-        model = GenerativeModel("publishers/google/models/gemini-2.5-flash")
+        client.models.generate_content(
+            model=MODEL_FLASH,
+            contents="Warmup",
+            config=genai_types.GenerateContentConfig(
+                temperature=0,
+                topP=1,
+                maxOutputTokens=8,
+            ),
+        )
         st.warning("⚠️ Falling back to Gemini 2.5 Flash")
+        default_model = MODEL_FLASH
 
-    # Warm the model with a tiny, deterministic call so the first real call is faster.
-    # This costs a tiny amount of compute but reduces cold-start latency.
-    try:
-        # small warm-up prompt, deterministic and token-limited
-        model.generate_content("Warmup", generation_config={"temperature": 0, "top_p": 1, "max_output_tokens": 8})
-    except Exception:
-        # ignore warmup errors (do not block)
-        pass
+    return client, default_model
 
-    return model
+def build_generate_config(generation_config=None):
+    cfg = generation_config or {}
+    return genai_types.GenerateContentConfig(
+        temperature=cfg.get("temperature"),
+        topP=cfg.get("top_p"),
+        topK=cfg.get("top_k"),
+        candidateCount=cfg.get("candidate_count"),
+        maxOutputTokens=cfg.get("max_output_tokens"),
+    )
+
+def generate_text(prompt, generation_config=None, model_name=None):
+    client, default_model = init_vertex_and_model()
+    response = client.models.generate_content(
+        model=model_name or default_model,
+        contents=prompt,
+        config=build_generate_config(generation_config),
+    )
+    return response.text or ""
+
+def generate_stream_text(prompt, generation_config=None, model_name=None):
+    client, default_model = init_vertex_and_model()
+    stream = client.models.generate_content_stream(
+        model=model_name or default_model,
+        contents=prompt,
+        config=build_generate_config(generation_config),
+    )
+    chunks = []
+    for chunk in stream:
+        if getattr(chunk, "text", None):
+            chunks.append(chunk.text)
+    return "".join(chunks)
 
 
 # =================================================
@@ -694,8 +742,13 @@ def filter_gemini_rows(raw_table, article_text):
         original, corrected, reason = cols
 
         # Verbatim safety: original must exist exactly in article text
-        if original in article_text:
-            output.append(f"| {original} | {corrected} | {reason} |")
+        if original not in article_text:
+            continue
+
+        if is_noop_correction(original, corrected, reason):
+            continue
+
+        output.append(f"| {original} | {corrected} | {reason} |")
 
     return "\n".join(output) if header_added else ""
 
@@ -810,16 +863,16 @@ Return output strictly as a table:
     responses = []
 
     def call_gemini(prompt):
-        model = GenerativeModel("publishers/google/models/gemini-2.5-flash")
-        return model.generate_content(
+        return generate_text(
             prompt,
             generation_config={
                 "temperature": 0,
                 "top_p": 1,
                 "top_k": 1,
                 "candidate_count": 1
-            }
-        ).text
+            },
+            model_name=MODEL_FLASH,
+        )
 
     # Parallel batch calls for speed (same logic/output)
     with ThreadPoolExecutor(max_workers=3) as executor:
@@ -881,7 +934,6 @@ Return output strictly as a table:
 # =================================================
 def gemini_editorial_review(article_data, web_story=False, health_beauty=False):
     init_vertex_and_model()
-    model = GenerativeModel("publishers/google/models/gemini-2.5-flash")
 
     paragraphs = [
         text[:900]
@@ -934,20 +986,16 @@ TEXT:
 {joined_paragraphs}
 """
 
-    response = model.generate_content(
+    return generate_text(
         prompt,
         generation_config={
             "temperature": 0,
             "top_p": 1,
             "top_k": 1,
             "candidate_count": 1
-        }
+        },
+        model_name=MODEL_FLASH,
     )
-
-    try:
-        return response.text
-    except Exception:
-        return response.candidates[0].content.parts[0].text
 
 
 # =================================================
@@ -966,6 +1014,39 @@ def cached_gemini_editorial_review(article_data, web_story=False, health_beauty=
 @st.cache_data(show_spinner=False)
 def cached_gemini_fact_check(article_data, max_chars=FACT_MAX_CHARS, max_items=FACT_MAX_ITEMS):
     return gemini_fact_check(article_data, max_chars, max_items)
+
+
+# ============================
+# No-op correction filters
+# ============================
+def normalize_for_equality(text: str) -> str:
+    text = html.unescape((text or "").strip())
+    text = text.replace("\u00a0", " ")
+    text = re.sub(r"\s+", " ", text)
+    return text
+
+
+def is_noop_reason(reason: str) -> bool:
+    normalised = normalize_for_equality(reason).lower()
+    return normalised in {
+        "",
+        "no correction needed",
+        "no corrections needed",
+        "no change needed",
+        "no changes needed",
+        "already correct",
+        "correct as is",
+        "no issue",
+        "no issues",
+        "no error",
+        "no errors",
+    }
+
+
+def is_noop_correction(original: str, corrected: str, reason: str = "") -> bool:
+    if is_noop_reason(reason):
+        return True
+    return normalize_for_equality(original) == normalize_for_equality(corrected)
 
 
 # ============================
@@ -992,6 +1073,9 @@ def filter_invalid_rows(gemini_md, article_text):
 
         # must exist verbatim
         if original not in article_text:
+            continue
+
+        if is_noop_correction(original, corrected, reason):
             continue
 
         # 🔥 FIX #1: normalised edit signature (stable dedupe)
@@ -1023,6 +1107,9 @@ def split_spelling_grammar(table_md: str):
 
     for original, corrected, reason in rows:
         if original.lower() == "original":
+            continue
+
+        if is_noop_correction(original, corrected, reason):
             continue
 
         # 🔑 MINIMAL FIX
@@ -1136,7 +1223,7 @@ def chunked(lst, size):
 # FACT CHECK — SECOND PASS (FAST, STREAMING, STABLE)
 # =================================================
 def gemini_fact_check(article_data, max_chars=FACT_MAX_CHARS, max_items=FACT_MAX_ITEMS):
-    model = init_vertex_and_model()
+    init_vertex_and_model()
 
     # 1️⃣ Deterministic statement universe
     statements = extract_fact_statements(article_data)
@@ -1157,33 +1244,23 @@ def gemini_fact_check(article_data, max_chars=FACT_MAX_CHARS, max_items=FACT_MAX
         batch_block = "\n".join(f"- {stmt}" for stmt in batch)
 
         fact_prompt = f"""
-You are an internal factual consistency auditor.
+You are a factual accuracy reviewer.
 
-SCOPE (STRICT):
-- Treat the TEXT as a closed, self-contained document
-- Do NOT use external knowledge, memory, news, timelines, or assumptions
-- Do NOT rely on real-world verification
-- You may ONLY evaluate statements using information present in the TEXT
-
-SPAN ANCHORING (MANDATORY):
+SCOPE:
+- Use general world knowledge to assess factual accuracy
 - Only evaluate statements that appear verbatim in the TEXT
 - Quote the EXACT sentence fragment under "Statement"
 - Do NOT paraphrase, rewrite, or infer
 
 EVALUATION RULES:
-- Identify ONLY internal contradictions, misleading implications,
-  or factual inconsistencies within the TEXT
-- If a statement cannot be verified using the TEXT alone,
-  mark the Issue as "Unverifiable from article"
-- If no correcting statement exists elsewhere in the TEXT,
-  write "Not stated in article" in Correct Fact
-- NEVER invent facts, dates, announcements, or corrections
+- If a statement is likely false, mark Issue as "Likely false" and provide the correct fact
+- If a statement is uncertain or time-sensitive, mark Issue as "Needs verification"
+- If a statement is likely true, omit it (do NOT create a row)
+- NEVER invent facts; if unsure, use "Needs verification"
 
 DO NOT:
 - Check grammar, spelling, or style
 - Rewrite sentences
-- Introduce external facts
-- Create hypothetical corrections
 
 Return output strictly as a table:
 | Statement | Issue | Correct Fact |
@@ -1191,12 +1268,12 @@ Return output strictly as a table:
 TEXT:
 {full_text}
 
-STATEMENTS:
+        STATEMENTS:
 {batch_block}
 """
 
         try:
-            response = model.generate_content(
+            return generate_stream_text(
                 fact_prompt,
                 generation_config={
                     "temperature": 0,
@@ -1204,15 +1281,8 @@ STATEMENTS:
                     "top_k": 1,
                     "candidate_count": 1
                 },
-                stream=True
+                model_name=MODEL_FLASH,
             )
-
-            chunks = []
-            for chunk in response:
-                if hasattr(chunk, "text") and chunk.text:
-                    chunks.append(chunk.text)
-
-            return "".join(chunks)
         except Exception:
             return ""
 

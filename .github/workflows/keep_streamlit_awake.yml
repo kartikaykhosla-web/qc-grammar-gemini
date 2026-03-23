@@ -1,0 +1,38 @@
+name: Keep Streamlit Awake
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+
+jobs:
+  ping-app:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate app URL
+        env:
+          STREAMLIT_APP_URL: ${{ vars.STREAMLIT_APP_URL }}
+        run: |
+          if [ -z "$STREAMLIT_APP_URL" ]; then
+            echo "Repository variable STREAMLIT_APP_URL is not set."
+            exit 1
+          fi
+
+      - name: Ping Streamlit app
+        env:
+          STREAMLIT_APP_URL: ${{ vars.STREAMLIT_APP_URL }}
+        run: |
+          curl --fail --silent --show-error --location \
+            --max-time 60 \
+            --retry 3 \
+            "$STREAMLIT_APP_URL" > /dev/null
+
+      - name: Warm follow-up ping
+        env:
+          STREAMLIT_APP_URL: ${{ vars.STREAMLIT_APP_URL }}
+        run: |
+          sleep 20
+          curl --fail --silent --show-error --location \
+            --max-time 60 \
+            --retry 3 \
+            "$STREAMLIT_APP_URL" > /dev/null
