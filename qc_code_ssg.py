@@ -1146,6 +1146,108 @@ def split_spelling_grammar(table_md: str):
 
     return build_table(spelling_rows), build_table(grammar_rows)
 
+
+def tokenize_for_diff(text: str):
+    return re.findall(r"\s+|[\w]+|[^\w\s]", text or "", flags=re.UNICODE)
+
+
+def highlight_diff_pair(original: str, corrected: str):
+    original_tokens = tokenize_for_diff(original)
+    corrected_tokens = tokenize_for_diff(corrected)
+    matcher = SequenceMatcher(a=original_tokens, b=corrected_tokens)
+
+    original_parts = []
+    corrected_parts = []
+
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        original_chunk = "".join(original_tokens[i1:i2])
+        corrected_chunk = "".join(corrected_tokens[j1:j2])
+
+        if tag == "equal":
+            original_parts.append(html.escape(original_chunk))
+            corrected_parts.append(html.escape(corrected_chunk))
+            continue
+
+        if original_chunk:
+            original_parts.append(
+                f'<span class="qc-diff qc-diff-original">{html.escape(original_chunk)}</span>'
+            )
+        if corrected_chunk:
+            corrected_parts.append(
+                f'<span class="qc-diff qc-diff-corrected">{html.escape(corrected_chunk)}</span>'
+            )
+
+    return "".join(original_parts), "".join(corrected_parts)
+
+
+def parse_language_table_md(table_md: str):
+    rows = []
+    matches = re.findall(
+        r"\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|",
+        table_md or "",
+    )
+
+    for original, corrected, reason in matches:
+        if original.lower() == "original":
+            continue
+        rows.append((original.strip(), corrected.strip(), reason.strip()))
+
+    return rows
+
+
+def render_language_table(table_md: str):
+    rows = parse_language_table_md(table_md)
+    if not rows:
+        return ""
+
+    lines = [
+        """
+<style>
+.qc-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 1rem;
+}
+.qc-table th, .qc-table td {
+  border: 1px solid rgba(250,250,250,0.14);
+  padding: 0.75rem 0.9rem;
+  vertical-align: top;
+  text-align: left;
+}
+.qc-table .qc-diff-original {
+  color: #ff6b6b;
+  font-weight: 700;
+}
+.qc-table .qc-diff-corrected {
+  color: #4ade80;
+  font-weight: 700;
+}
+</style>
+<table class="qc-table">
+  <thead>
+    <tr>
+      <th>Original</th>
+      <th>Corrected</th>
+      <th>Reason</th>
+    </tr>
+  </thead>
+  <tbody>
+        """.strip()
+    ]
+
+    for original, corrected, reason in rows:
+        original_html, corrected_html = highlight_diff_pair(original, corrected)
+        lines.append(
+            "<tr>"
+            f"<td>{original_html}</td>"
+            f"<td>{corrected_html}</td>"
+            f"<td>{html.escape(reason)}</td>"
+            "</tr>"
+        )
+
+    lines.append("</tbody></table>")
+    return "\n".join(lines)
+
 # =============================
 # Is structural Inline
 # =============================
@@ -1472,11 +1574,17 @@ if analysis_ready:
         clean = filter_invalid_rows(raw_text, article_text)
         spelling_table, grammar_table = split_spelling_grammar(clean)
         if spelling_table:
-            spelling_placeholder.markdown(spelling_table)
+            spelling_placeholder.markdown(
+                render_language_table(spelling_table),
+                unsafe_allow_html=True,
+            )
         else:
             spelling_placeholder.success("✅ No spelling issues found")
         if grammar_table:
-            grammar_placeholder.markdown(grammar_table)
+            grammar_placeholder.markdown(
+                render_language_table(grammar_table),
+                unsafe_allow_html=True,
+            )
         else:
             grammar_placeholder.success("✅ No grammar issues found")
 
