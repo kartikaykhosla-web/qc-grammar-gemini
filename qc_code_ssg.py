@@ -525,6 +525,41 @@ def generate_text(prompt, generation_config=None, model_name=None):
     )
     return response.text or ""
 
+def format_ai_error(prefix: str, exc: Exception) -> str:
+    return f"__ERROR__:{prefix}: {type(exc).__name__}: {exc}"
+
+def is_ai_error_output(text: str) -> bool:
+    value = (text or "").strip()
+    return value.startswith("__ERROR__:") or value.startswith("Error:")
+
+def summarise_ai_error(text: str) -> str:
+    value = (text or "").replace("__ERROR__:", "").strip()
+    lower = value.lower()
+
+    project_match = re.search(r"project[s/ ]+([a-z0-9\\-]+)", value, flags=re.IGNORECASE)
+    project_id = project_match.group(1) if project_match else "the configured project"
+
+    if "service_disabled" in lower or "vertex ai api has not been used in project" in lower:
+        return (
+            f"Vertex AI API is disabled in {project_id}. Enable `aiplatform.googleapis.com`, "
+            "wait a few minutes, and retry."
+        )
+    if "iam_permission_denied" in lower or "aiplatform.endpoints.predict" in lower:
+        return (
+            f"The configured service account does not have Vertex AI prediction permission "
+            f"(`aiplatform.endpoints.predict`) in {project_id}."
+        )
+    if "invalid jwt signature" in lower or "invalid_grant" in lower:
+        return "The configured service-account key is invalid, revoked, or does not match the active secret."
+    return value
+
+def render_ai_error(section_label: str, value: str, container=None) -> bool:
+    if not is_ai_error_output(value):
+        return False
+    target = container if container is not None else st
+    target.error(f"{section_label}: {summarise_ai_error(value)}")
+    return True
+
 def generate_stream_text(prompt, generation_config=None, model_name=None):
     client, default_model = init_vertex_and_model()
     stream = client.models.generate_content_stream(
@@ -1999,6 +2034,9 @@ if analysis_ready:
     fact_placeholder = st.empty()
 
     def render_grammar(raw_text):
+        if render_ai_error("Spelling/Grammar AI", raw_text, spelling_placeholder):
+            render_ai_error("Spelling/Grammar AI", raw_text, grammar_placeholder)
+            return
         clean = filter_invalid_rows(raw_text, article_text)
         spelling_table, grammar_table = split_spelling_grammar(clean)
         if spelling_table:
@@ -2017,6 +2055,8 @@ if analysis_ready:
             grammar_placeholder.success("✅ No grammar issues found")
 
     def render_fact(fact_text):
+        if render_ai_error("Fact-check AI", fact_text, fact_placeholder):
+            return
         if not fact_text or "| Statement |" not in fact_text:
             fact_placeholder.success("✅ No factual issues found")
         else:
@@ -2031,7 +2071,8 @@ if analysis_ready:
 
     if run_gemini_editorial:
         if "gemini_editorial" in results:
-            editorial_placeholder.markdown(results["gemini_editorial"])
+            if not render_ai_error("Editorial AI", results["gemini_editorial"], editorial_placeholder):
+                editorial_placeholder.markdown(results["gemini_editorial"])
         else:
             editorial_placeholder.info("Running Gemini editorial QC...")
 
@@ -2069,7 +2110,7 @@ if analysis_ready:
             try:
                 result = future.result()
             except Exception as exc:
-                result = f"Error: {exc}"
+                result = format_ai_error(key, exc)
 
             if key == "grammar":
                 results["grammar_raw"] = result
@@ -2077,7 +2118,8 @@ if analysis_ready:
             elif key == "editorial":
                 results["gemini_editorial"] = result
                 if editorial_placeholder:
-                    editorial_placeholder.markdown(result)
+                    if not render_ai_error("Editorial AI", result, editorial_placeholder):
+                        editorial_placeholder.markdown(result)
             elif key == "fact":
                 results["fact_result"] = result
                 render_fact(result)
