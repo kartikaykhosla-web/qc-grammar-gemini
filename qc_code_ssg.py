@@ -13,9 +13,12 @@ import base64
 import requests
 import hashlib
 import tempfile
+import sqlite3
+import uuid
 import streamlit as st
 import html
 import time
+from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from bs4 import BeautifulSoup
 from google.oauth2 import service_account
@@ -47,6 +50,379 @@ from google.genai import types as genai_types
 # STREAMLIT CONFIG
 # =================================================
 st.set_page_config(page_title="Article QC Tool (Gemini 2.5)", layout="wide")
+
+def _secret(name: str, default=""):
+    try:
+        return st.secrets[name]
+    except Exception:
+        return default
+
+ALLOWED_EMAIL_DOMAIN = str(_secret("ALLOWED_EMAIL_DOMAIN", "jagrannewmedia.com")).strip().lower()
+APP_ACCESS_SUPPORT_TEXT = str(
+    _secret(
+        "APP_ACCESS_SUPPORT_TEXT",
+        "Enter your Jagran New Media email address to continue.",
+    )
+).strip()
+ADMIN_EMAIL = "kartikay.khosla@jagrannewmedia.com"
+HISTORY_DB_PATH = os.path.join(os.path.dirname(__file__), ".app_history.sqlite3")
+
+def _email_allowed(email: str) -> bool:
+    return (email or "").strip().lower().endswith(f"@{ALLOWED_EMAIL_DOMAIN}")
+
+def _normalise_username(username: str) -> str:
+    value = (username or "").strip().lower().replace(" ", "")
+    if "@" in value:
+        return ""
+    return value
+
+def _build_email_from_username(username: str) -> str:
+    username = _normalise_username(username)
+    if not username:
+        return ""
+    return f"{username}@{ALLOWED_EMAIL_DOMAIN}"
+
+def _email_access_granted() -> bool:
+    email = st.session_state.get("_email_access_email", "")
+    return bool(st.session_state.get("_email_access_granted")) and _email_allowed(email)
+
+def _clear_email_access():
+    st.session_state.pop("_email_access_granted", None)
+    st.session_state.pop("_email_access_email", None)
+    _clear_pending_analysis_state()
+
+def _current_access_email() -> str:
+    return (st.session_state.get("_email_access_email") or "").strip().lower()
+
+def _is_admin_user() -> bool:
+    return _current_access_email() == ADMIN_EMAIL
+
+def _history_conn():
+    conn = sqlite3.connect(HISTORY_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def ensure_history_db():
+    try:
+        with _history_conn() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS login_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts_utc TEXT NOT NULL,
+                    app TEXT NOT NULL,
+                    email TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS analysis_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id TEXT NOT NULL UNIQUE,
+                    ts_utc TEXT NOT NULL,
+                    app TEXT NOT NULL,
+                    email TEXT NOT NULL,
+                    source_type TEXT NOT NULL,
+                    source_identity TEXT NOT NULL,
+                    source_label TEXT NOT NULL,
+                    analysis_key TEXT,
+                    iteration INTEGER NOT NULL,
+                    spelling_count INTEGER NOT NULL DEFAULT 0,
+                    grammar_count INTEGER NOT NULL DEFAULT 0,
+                    editorial_count INTEGER NOT NULL DEFAULT 0,
+                    fact_count INTEGER NOT NULL DEFAULT 0,
+                    total_count INTEGER NOT NULL DEFAULT 0
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_login_events_app_email_ts ON login_events(app, email, ts_utc)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_analysis_runs_app_source_ts ON analysis_runs(app, source_identity, ts_utc)"
+            )
+    except Exception:
+        pass
+
+def _clear_pending_analysis_state():
+    for key in (
+        "_pending_run_id",
+        "_pending_source_type",
+        "_pending_source_identity",
+        "_pending_source_label",
+        "_pending_analysis_key",
+    ):
+        st.session_state.pop(key, None)
+
+def queue_analysis_run(source_type: str, source_identity: str, source_label: str, analysis_key: str = ""):
+    st.session_state["_pending_run_id"] = uuid.uuid4().hex
+    st.session_state["_pending_source_type"] = source_type
+    st.session_state["_pending_source_identity"] = source_identity
+    st.session_state["_pending_source_label"] = source_label
+    st.session_state["_pending_analysis_key"] = analysis_key
+
+def _record_access_event(app_name: str, email: str):
+    try:
+        ensure_history_db()
+        with _history_conn() as conn:
+            conn.execute(
+                "INSERT INTO login_events (ts_utc, app, email) VALUES (?, ?, ?)",
+                (datetime.now(timezone.utc).isoformat(), app_name, (email or "").strip().lower()),
+            )
+    except Exception:
+        pass
+
+def count_markdown_rows(table_md: str, header_name: str) -> int:
+    count = 0
+    for line in (table_md or "").splitlines():
+        row = line.strip()
+        if not row.startswith("|") or row.count("|") < 2:
+            continue
+        parts = [part.strip() for part in row.strip("|").split("|")]
+        if not parts or not any(parts):
+            continue
+        if all(re.fullmatch(r":?-{2,}:?", part or "") for part in parts):
+            continue
+        if parts[0].lower() == header_name.lower():
+            continue
+        count += 1
+    return count
+
+def log_analysis_run(app_name: str, email: str, source_type: str, source_identity: str, source_label: str,
+                     analysis_key: str, spelling_count: int, grammar_count: int,
+                     editorial_count: int, fact_count: int):
+    run_id = st.session_state.get("_pending_run_id")
+    if not run_id:
+        return
+
+    try:
+        ensure_history_db()
+        with _history_conn() as conn:
+            exists = conn.execute(
+                "SELECT 1 FROM analysis_runs WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            if exists:
+                _clear_pending_analysis_state()
+                return
+
+            iteration = conn.execute(
+                "SELECT COALESCE(MAX(iteration), 0) + 1 FROM analysis_runs WHERE app = ? AND source_identity = ?",
+                (app_name, source_identity),
+            ).fetchone()[0]
+
+            conn.execute(
+                """
+                INSERT INTO analysis_runs (
+                    run_id, ts_utc, app, email, source_type, source_identity, source_label,
+                    analysis_key, iteration, spelling_count, grammar_count, editorial_count,
+                    fact_count, total_count
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    datetime.now(timezone.utc).isoformat(),
+                    app_name,
+                    (email or "").strip().lower(),
+                    source_type,
+                    source_identity,
+                    source_label,
+                    analysis_key,
+                    iteration,
+                    int(spelling_count),
+                    int(grammar_count),
+                    int(editorial_count),
+                    int(fact_count),
+                    int(spelling_count + grammar_count + editorial_count + fact_count),
+                ),
+            )
+        _clear_pending_analysis_state()
+    except Exception:
+        pass
+
+def _fetch_rows(query: str, params=()):
+    try:
+        ensure_history_db()
+        with _history_conn() as conn:
+            return [dict(row) for row in conn.execute(query, params).fetchall()]
+    except Exception:
+        return []
+
+def render_admin_dashboard(app_name: str):
+    st.divider()
+    with st.expander("Admin History", expanded=False):
+        daily_rows = _fetch_rows(
+            """
+            WITH login_daily AS (
+                SELECT
+                    substr(ts_utc, 1, 10) AS date_utc,
+                    email,
+                    COUNT(*) AS login_count
+                FROM login_events
+                WHERE app = ?
+                GROUP BY substr(ts_utc, 1, 10), email
+            ),
+            analysis_daily AS (
+                SELECT
+                    substr(ts_utc, 1, 10) AS date_utc,
+                    email,
+                    COUNT(*) AS analyses_run,
+                    COUNT(DISTINCT source_identity) AS distinct_articles,
+                    COALESCE(SUM(spelling_count), 0) AS spelling_issues,
+                    COALESCE(SUM(grammar_count), 0) AS grammar_issues,
+                    COALESCE(SUM(editorial_count), 0) AS editorial_issues,
+                    COALESCE(SUM(fact_count), 0) AS fact_issues
+                FROM analysis_runs
+                WHERE app = ?
+                GROUP BY substr(ts_utc, 1, 10), email
+            ),
+            combined AS (
+                SELECT date_utc, email FROM login_daily
+                UNION
+                SELECT date_utc, email FROM analysis_daily
+            )
+            SELECT
+                c.date_utc,
+                c.email,
+                COALESCE(l.login_count, 0) AS login_count,
+                COALESCE(a.analyses_run, 0) AS analyses_run,
+                COALESCE(a.distinct_articles, 0) AS distinct_articles,
+                COALESCE(a.spelling_issues, 0) AS spelling_issues,
+                COALESCE(a.grammar_issues, 0) AS grammar_issues,
+                COALESCE(a.editorial_issues, 0) AS editorial_issues,
+                COALESCE(a.fact_issues, 0) AS fact_issues
+            FROM combined c
+            LEFT JOIN login_daily l
+              ON l.date_utc = c.date_utc AND l.email = c.email
+            LEFT JOIN analysis_daily a
+              ON a.date_utc = c.date_utc AND a.email = c.email
+            ORDER BY c.date_utc DESC, c.email ASC
+            LIMIT 180
+            """,
+            (app_name, app_name),
+        )
+
+        login_rows = _fetch_rows(
+            """
+            SELECT ts_utc, email
+            FROM login_events
+            WHERE app = ?
+            ORDER BY ts_utc DESC
+            LIMIT 200
+            """,
+            (app_name,),
+        )
+
+        recent_rows = _fetch_rows(
+            """
+            SELECT
+                ts_utc,
+                email,
+                source_type,
+                source_label,
+                iteration,
+                spelling_count,
+                grammar_count,
+                editorial_count,
+                fact_count,
+                total_count
+            FROM analysis_runs
+            WHERE app = ?
+            ORDER BY ts_utc DESC
+            LIMIT 200
+            """,
+            (app_name,),
+        )
+
+        source_search = st.text_input("Search article or document", key=f"{app_name}_history_search")
+        search_rows = []
+        if source_search:
+            like = f"%{source_search.strip()}%"
+            search_rows = _fetch_rows(
+                """
+                SELECT
+                    ts_utc,
+                    email,
+                    source_type,
+                    source_label,
+                    source_identity,
+                    iteration,
+                    spelling_count,
+                    grammar_count,
+                    editorial_count,
+                    fact_count,
+                    total_count
+                FROM analysis_runs
+                WHERE app = ?
+                  AND (source_label LIKE ? OR source_identity LIKE ?)
+                ORDER BY ts_utc DESC
+                LIMIT 200
+                """,
+                (app_name, like, like),
+            )
+
+        st.markdown("#### Daily Summary")
+        if daily_rows:
+            st.dataframe(daily_rows, use_container_width=True)
+        else:
+            st.info("No daily history available yet.")
+
+        st.markdown("#### Recent Analysis Runs")
+        if recent_rows:
+            st.dataframe(recent_rows, use_container_width=True)
+        else:
+            st.info("No analysis runs recorded yet.")
+
+        st.markdown("#### Recent Logins")
+        if login_rows:
+            st.dataframe(login_rows, use_container_width=True)
+        else:
+            st.info("No login history recorded yet.")
+
+        st.markdown("#### Article / Document Iterations")
+        if source_search:
+            if search_rows:
+                st.dataframe(search_rows, use_container_width=True)
+            else:
+                st.info("No matching article or document history found.")
+        else:
+            st.caption("Search by URL, filename, or document hash to see iteration history.")
+
+def enforce_app_access(app_title: str, app_caption: str, app_name: str):
+    if _email_access_granted():
+        with st.sidebar:
+            st.caption(f"Signed in as {st.session_state.get('_email_access_email', '')}")
+            if st.button("Log out"):
+                _clear_email_access()
+                st.rerun()
+        return
+
+    st.title(app_title)
+    st.caption(app_caption)
+    with st.form("email_access_login"):
+        username = st.text_input("Work email username", placeholder="firstname.lastname")
+        st.caption(f"Domain fixed as @{ALLOWED_EMAIL_DOMAIN}")
+        submitted = st.form_submit_button("Continue", type="primary")
+
+    st.caption(APP_ACCESS_SUPPORT_TEXT)
+
+    if submitted:
+        email = _build_email_from_username(username)
+        if not _email_allowed(email):
+            st.error("Please enter only your username, without '@' or the domain.")
+        else:
+            st.session_state["_email_access_granted"] = True
+            st.session_state["_email_access_email"] = email
+            _record_access_event(app_name, email)
+            st.rerun()
+    st.stop()
+
+enforce_app_access(
+    "🧪 Article QC Tool (Gemini 2.5 – Vertex AI)",
+    "Spelling · Grammar · Editorial Safety · AI Review",
+    "english_qc",
+)
 st.title("🧪 Article QC Tool (Gemini 2.5 – Vertex AI)")
 st.caption("Spelling · Grammar · Editorial Safety · AI Review")
 
@@ -54,7 +430,7 @@ st.caption("Spelling · Grammar · Editorial Safety · AI Review")
 # =================================================
 # 🔑 VERTEX AI AUTH (BASE64 SAFE)
 # =================================================
-PROJECT_ID = "prod-project-jnm-smart-cms"
+PROJECT_ID = str(_secret("VERTEX_PROJECT_ID", "")).strip()
 REGION = "us-central1"
 CRED_PATH = "/tmp/gcp_service_account.json"
 MODEL_PRO = "gemini-2.5-pro"
@@ -81,18 +457,23 @@ def load_gcp_credentials():
         json.dump(creds_dict, f)
 
     os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = CRED_PATH
-    return service_account.Credentials.from_service_account_info(
+    creds = service_account.Credentials.from_service_account_info(
         creds_dict,
         scopes=[CLOUD_PLATFORM_SCOPE],
     )
+    project_id = PROJECT_ID or str(creds_dict.get("project_id", "")).strip()
+    if not project_id:
+        st.error("❌ Could not determine Vertex project ID from secrets or service account JSON")
+        st.stop()
+    return creds, project_id
 
 @st.cache_resource
 def init_vertex_and_model():
-    creds = load_gcp_credentials()
+    creds, project_id = load_gcp_credentials()
 
     client = genai.Client(
         vertexai=True,
-        project=PROJECT_ID,
+        project=project_id,
         location=REGION,
         credentials=creds,
     )
@@ -175,9 +556,46 @@ def clean_docx(file_path):
     return content
 
 def clean_article(url):
-    headers = {"User-Agent": "Mozilla/5.0"}
-    response = requests.get(url, headers=headers, timeout=15)
-    response.raise_for_status()
+    header_profiles = [
+        {
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/137.0.0.0 Safari/537.36"
+            ),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-IN,en-GB;q=0.9,en;q=0.8",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+        },
+        {
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "*/*",
+        },
+    ]
+
+    response = None
+    last_exc = None
+
+    for headers in header_profiles:
+        try:
+            response = requests.get(url, headers=headers, timeout=20, allow_redirects=True)
+            response.raise_for_status()
+            break
+        except requests.RequestException as exc:
+            last_exc = exc
+            response = None
+            continue
+
+    if response is None:
+        status = ""
+        if isinstance(last_exc, requests.HTTPError) and last_exc.response is not None:
+            status = f" (HTTP {last_exc.response.status_code})"
+        raise RuntimeError(
+            "Unable to fetch the article URL from the server"
+            f"{status}. Try the DOCX upload option or retry later."
+        ) from last_exc
+
     soup = BeautifulSoup(response.text, "html.parser")
 
     content = []
@@ -1478,6 +1896,7 @@ run_gemini_editorial = st.sidebar.checkbox(
 )
 if st.sidebar.button("Clear cached AI outputs"):
     st.cache_data.clear()
+    _clear_pending_analysis_state()
     for key in (
         "analysis_results",
         "analysis_key",
@@ -1497,9 +1916,17 @@ if source == "URL":
     if url:
         current_key = f"url:{url.strip()}"
     if analyze_clicked and url:
-        article_content = clean_article(url)
-        st.session_state["article_content"] = article_content
-        st.session_state["input_key"] = current_key
+        try:
+            article_content = clean_article(url)
+            st.session_state["article_content"] = article_content
+            st.session_state["input_key"] = current_key
+            queue_analysis_run("url", current_key, url.strip())
+        except Exception as exc:
+            st.error(str(exc))
+            article_content = None
+            _clear_pending_analysis_state()
+            st.session_state.pop("article_content", None)
+            st.session_state.pop("input_key", None)
 else:
     uploaded = st.sidebar.file_uploader("Upload DOCX", type=["docx"])
     if uploaded:
@@ -1511,6 +1938,7 @@ else:
                 article_content = clean_docx(f.name)
             st.session_state["article_content"] = article_content
             st.session_state["input_key"] = current_key
+            queue_analysis_run("docx", current_key, uploaded.name or current_key)
 
 if article_content is None:
     if current_key and st.session_state.get("input_key") == current_key:
@@ -1660,6 +2088,18 @@ if analysis_ready:
 
     if "elapsed" not in results and required_keys.issubset(results.keys()):
         results["elapsed"] = time.perf_counter() - results["analysis_start"]
+        log_analysis_run(
+            "english_qc",
+            _current_access_email(),
+            st.session_state.get("_pending_source_type", source.lower()),
+            st.session_state.get("_pending_source_identity", current_key or ""),
+            st.session_state.get("_pending_source_label", url.strip() if source == "URL" and url else ""),
+            st.session_state.get("_pending_analysis_key", analysis_key or ""),
+            count_markdown_rows(split_spelling_grammar(filter_invalid_rows(results.get("grammar_raw", ""), article_text))[0], "Original"),
+            count_markdown_rows(split_spelling_grammar(filter_invalid_rows(results.get("grammar_raw", ""), article_text))[1], "Original"),
+            count_markdown_rows(results.get("gemini_editorial", ""), "Issue") if run_gemini_editorial else 0,
+            count_markdown_rows(results.get("fact_result", ""), "Statement"),
+        )
 
     elapsed = results.get("elapsed")
     if elapsed is not None:
@@ -1667,3 +2107,6 @@ if analysis_ready:
         seconds = int(round(elapsed % 60))
         st.caption(f"⏱️ Time taken: {minutes}m {seconds:02d}s")
         st.sidebar.metric("Time taken", f"{minutes}m {seconds:02d}s")
+
+if _is_admin_user():
+    render_admin_dashboard("english_qc")
