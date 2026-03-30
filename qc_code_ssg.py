@@ -17,6 +17,7 @@ import sqlite3
 import uuid
 import io
 import streamlit as st
+import extra_streamlit_components as stx
 import html
 import time
 from datetime import datetime, timezone, timedelta
@@ -68,6 +69,7 @@ APP_ACCESS_SUPPORT_TEXT = str(
 ADMIN_EMAIL = "kartikay.khosla@jagrannewmedia.com"
 HISTORY_DB_PATH = os.path.join(os.path.dirname(__file__), ".app_history.sqlite3")
 SESSION_QUERY_KEY = "_jnm_session"
+SESSION_COOKIE_KEY = "_jnm_session"
 SESSION_TTL_HOURS = 24
 
 def _email_allowed(email: str) -> bool:
@@ -111,6 +113,10 @@ def _utc_now():
 def _hash_session_token(token: str) -> str:
     return hashlib.sha256(f"{ALLOWED_EMAIL_DOMAIN}:{token}".encode("utf-8")).hexdigest()
 
+@st.cache_resource
+def _get_cookie_manager():
+    return stx.CookieManager()
+
 def _get_session_query_token() -> str:
     try:
         value = st.query_params.get(SESSION_QUERY_KEY, "")
@@ -129,6 +135,30 @@ def _set_session_query_token(token: str):
 def _clear_session_query_token():
     try:
         st.query_params.pop(SESSION_QUERY_KEY, None)
+    except Exception:
+        pass
+
+def _get_session_cookie_token() -> str:
+    try:
+        value = _get_cookie_manager().get(SESSION_COOKIE_KEY)
+        return (value or "").strip()
+    except Exception:
+        return ""
+
+def _set_session_cookie_token(token: str):
+    try:
+        _get_cookie_manager().set(
+            SESSION_COOKIE_KEY,
+            token,
+            expires_at=datetime.now() + timedelta(hours=SESSION_TTL_HOURS),
+            key=f"set-cookie-{SESSION_COOKIE_KEY}",
+        )
+    except Exception:
+        pass
+
+def _clear_session_cookie_token():
+    try:
+        _get_cookie_manager().delete(SESSION_COOKIE_KEY, key=f"delete-cookie-{SESSION_COOKIE_KEY}")
     except Exception:
         pass
 
@@ -218,11 +248,12 @@ def _create_persisted_session(app_name: str, email: str):
                 (_hash_session_token(token), app_name, (email or "").strip().lower(), now_iso, expires_iso, now_iso),
             )
         _set_session_query_token(token)
+        _set_session_cookie_token(token)
     except Exception:
         pass
 
 def _revoke_persisted_session(app_name: str):
-    token = _get_session_query_token()
+    token = _get_session_query_token() or _get_session_cookie_token()
     if token:
         try:
             ensure_history_db()
@@ -234,12 +265,13 @@ def _revoke_persisted_session(app_name: str):
         except Exception:
             pass
     _clear_session_query_token()
+    _clear_session_cookie_token()
 
 def _restore_persisted_session(app_name: str) -> bool:
     if _email_access_granted():
         return True
 
-    token = _get_session_query_token()
+    token = _get_session_query_token() or _get_session_cookie_token()
     if not token:
         return False
 
@@ -262,6 +294,7 @@ def _restore_persisted_session(app_name: str) -> bool:
             ).fetchone()
             if not row:
                 _clear_session_query_token()
+                _clear_session_cookie_token()
                 return False
 
             refreshed_expiry = (_utc_now() + timedelta(hours=SESSION_TTL_HOURS)).isoformat()
@@ -277,8 +310,11 @@ def _restore_persisted_session(app_name: str) -> bool:
         email = (row["email"] or "").strip().lower()
         if not _email_allowed(email):
             _clear_session_query_token()
+            _clear_session_cookie_token()
             return False
 
+        _set_session_query_token(token)
+        _set_session_cookie_token(token)
         st.session_state["_email_access_granted"] = True
         st.session_state["_email_access_email"] = email
         return True
