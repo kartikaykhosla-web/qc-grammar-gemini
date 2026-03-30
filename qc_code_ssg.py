@@ -15,10 +15,11 @@ import hashlib
 import tempfile
 import sqlite3
 import uuid
+import io
 import streamlit as st
 import html
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from bs4 import BeautifulSoup
 from google.oauth2 import service_account
@@ -66,6 +67,8 @@ APP_ACCESS_SUPPORT_TEXT = str(
 ).strip()
 ADMIN_EMAIL = "kartikay.khosla@jagrannewmedia.com"
 HISTORY_DB_PATH = os.path.join(os.path.dirname(__file__), ".app_history.sqlite3")
+SESSION_QUERY_KEY = "_jnm_session"
+SESSION_TTL_HOURS = 24
 
 def _email_allowed(email: str) -> bool:
     return (email or "").strip().lower().endswith(f"@{ALLOWED_EMAIL_DOMAIN}")
@@ -102,6 +105,33 @@ def _history_conn():
     conn.row_factory = sqlite3.Row
     return conn
 
+def _utc_now():
+    return datetime.now(timezone.utc)
+
+def _hash_session_token(token: str) -> str:
+    return hashlib.sha256(f"{ALLOWED_EMAIL_DOMAIN}:{token}".encode("utf-8")).hexdigest()
+
+def _get_session_query_token() -> str:
+    try:
+        value = st.query_params.get(SESSION_QUERY_KEY, "")
+        if isinstance(value, list):
+            return (value[0] or "").strip()
+        return (value or "").strip()
+    except Exception:
+        return ""
+
+def _set_session_query_token(token: str):
+    try:
+        st.query_params[SESSION_QUERY_KEY] = token
+    except Exception:
+        pass
+
+def _clear_session_query_token():
+    try:
+        st.query_params.pop(SESSION_QUERY_KEY, None)
+    except Exception:
+        pass
+
 def ensure_history_db():
     try:
         with _history_conn() as conn:
@@ -137,10 +167,27 @@ def ensure_history_db():
                 """
             )
             conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS access_sessions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    token_hash TEXT NOT NULL UNIQUE,
+                    app TEXT NOT NULL,
+                    email TEXT NOT NULL,
+                    created_ts_utc TEXT NOT NULL,
+                    expires_ts_utc TEXT NOT NULL,
+                    revoked INTEGER NOT NULL DEFAULT 0,
+                    last_seen_ts_utc TEXT
+                )
+                """
+            )
+            conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_login_events_app_email_ts ON login_events(app, email, ts_utc)"
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_analysis_runs_app_source_ts ON analysis_runs(app, source_identity, ts_utc)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_access_sessions_app_email_expiry ON access_sessions(app, email, expires_ts_utc)"
             )
     except Exception:
         pass
@@ -154,6 +201,89 @@ def _clear_pending_analysis_state():
         "_pending_analysis_key",
     ):
         st.session_state.pop(key, None)
+
+def _create_persisted_session(app_name: str, email: str):
+    try:
+        ensure_history_db()
+        token = uuid.uuid4().hex + uuid.uuid4().hex
+        now_iso = _utc_now().isoformat()
+        expires_iso = (_utc_now() + timedelta(hours=SESSION_TTL_HOURS)).isoformat()
+        with _history_conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO access_sessions (
+                    token_hash, app, email, created_ts_utc, expires_ts_utc, revoked, last_seen_ts_utc
+                ) VALUES (?, ?, ?, ?, ?, 0, ?)
+                """,
+                (_hash_session_token(token), app_name, (email or "").strip().lower(), now_iso, expires_iso, now_iso),
+            )
+        _set_session_query_token(token)
+    except Exception:
+        pass
+
+def _revoke_persisted_session(app_name: str):
+    token = _get_session_query_token()
+    if token:
+        try:
+            ensure_history_db()
+            with _history_conn() as conn:
+                conn.execute(
+                    "UPDATE access_sessions SET revoked = 1 WHERE app = ? AND token_hash = ?",
+                    (app_name, _hash_session_token(token)),
+                )
+        except Exception:
+            pass
+    _clear_session_query_token()
+
+def _restore_persisted_session(app_name: str) -> bool:
+    if _email_access_granted():
+        return True
+
+    token = _get_session_query_token()
+    if not token:
+        return False
+
+    try:
+        ensure_history_db()
+        now_iso = _utc_now().isoformat()
+        with _history_conn() as conn:
+            row = conn.execute(
+                """
+                SELECT email
+                FROM access_sessions
+                WHERE app = ?
+                  AND token_hash = ?
+                  AND revoked = 0
+                  AND expires_ts_utc > ?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (app_name, _hash_session_token(token), now_iso),
+            ).fetchone()
+            if not row:
+                _clear_session_query_token()
+                return False
+
+            refreshed_expiry = (_utc_now() + timedelta(hours=SESSION_TTL_HOURS)).isoformat()
+            conn.execute(
+                """
+                UPDATE access_sessions
+                SET last_seen_ts_utc = ?, expires_ts_utc = ?
+                WHERE app = ? AND token_hash = ?
+                """,
+                (now_iso, refreshed_expiry, app_name, _hash_session_token(token)),
+            )
+
+        email = (row["email"] or "").strip().lower()
+        if not _email_allowed(email):
+            _clear_session_query_token()
+            return False
+
+        st.session_state["_email_access_granted"] = True
+        st.session_state["_email_access_email"] = email
+        return True
+    except Exception:
+        return False
 
 def queue_analysis_run(source_type: str, source_identity: str, source_label: str, analysis_key: str = ""):
     st.session_state["_pending_run_id"] = uuid.uuid4().hex
@@ -390,10 +520,12 @@ def render_admin_dashboard(app_name: str):
             st.caption("Search by URL, filename, or document hash to see iteration history.")
 
 def enforce_app_access(app_title: str, app_caption: str, app_name: str):
+    _restore_persisted_session(app_name)
     if _email_access_granted():
         with st.sidebar:
             st.caption(f"Signed in as {st.session_state.get('_email_access_email', '')}")
             if st.button("Log out"):
+                _revoke_persisted_session(app_name)
                 _clear_email_access()
                 st.rerun()
         return
@@ -415,6 +547,7 @@ def enforce_app_access(app_title: str, app_caption: str, app_name: str):
             st.session_state["_email_access_granted"] = True
             st.session_state["_email_access_email"] = email
             _record_access_event(app_name, email)
+            _create_persisted_session(app_name, email)
             st.rerun()
     st.stop()
 
@@ -1701,6 +1834,128 @@ def render_language_table(table_md: str):
     lines.append("</tbody></table>")
     return "\n".join(lines)
 
+def parse_markdown_table_rows(table_md: str, expected_columns: int):
+    rows = []
+    for line in (table_md or "").splitlines():
+        row = line.strip()
+        if not row.startswith("|") or row.count("|") < expected_columns:
+            continue
+        parts = [part.strip() for part in row.strip("|").split("|")]
+        if len(parts) != expected_columns:
+            continue
+        if all(re.fullmatch(r":?-{2,}:?", part or "") for part in parts):
+            continue
+        if parts[0].lower() in {"original", "issue", "statement"}:
+            continue
+        rows.append(parts)
+    return rows
+
+def build_english_qc_report_pdf(source_label: str, user_email: str, spelling_md: str, grammar_md: str, editorial_md: str, fact_md: str):
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.units import cm
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+    except Exception:
+        return None, "PDF export requires the `reportlab` package."
+
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        "qc-title",
+        parent=styles["Title"],
+        fontName="Helvetica-Bold",
+        fontSize=18,
+        leading=22,
+        textColor=colors.HexColor("#111827"),
+    )
+    body_style = ParagraphStyle(
+        "qc-body",
+        parent=styles["BodyText"],
+        fontName="Helvetica",
+        fontSize=9,
+        leading=12,
+        textColor=colors.HexColor("#111827"),
+    )
+    heading_style = ParagraphStyle(
+        "qc-heading",
+        parent=styles["Heading2"],
+        fontName="Helvetica-Bold",
+        fontSize=12,
+        leading=15,
+        textColor=colors.HexColor("#1f2937"),
+        spaceBefore=10,
+        spaceAfter=6,
+    )
+
+    def p(text):
+        safe = html.escape((text or "").replace("\n", " "))
+        return Paragraph(safe, body_style)
+
+    def add_table(story, title, headers, rows, widths):
+        story.append(Paragraph(title, heading_style))
+        if not rows:
+            story.append(Paragraph("No issues found", body_style))
+            story.append(Spacer(1, 0.2 * cm))
+            return
+
+        data = [[Paragraph(html.escape(h), body_style) for h in headers]]
+        for row in rows:
+            data.append([p(cell) for cell in row])
+
+        table = Table(data, colWidths=widths, repeatRows=1)
+        table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E5E7EB")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#111827")),
+            ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#D1D5DB")),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 6),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+            ("TOPPADDING", (0, 0), (-1, -1), 5),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ]))
+        story.append(table)
+        story.append(Spacer(1, 0.25 * cm))
+
+    spelling_rows = parse_markdown_table_rows(spelling_md, 3)
+    grammar_rows = parse_markdown_table_rows(grammar_md, 3)
+    editorial_rows = parse_markdown_table_rows(editorial_md, 3)
+    fact_rows = parse_markdown_table_rows(fact_md, 3)
+
+    summary_rows = [
+        ["Source", source_label or "-"],
+        ["User", user_email or "-"],
+        ["Generated (UTC)", datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")],
+        ["Spelling issues", str(len(spelling_rows))],
+        ["Grammar issues", str(len(grammar_rows))],
+        ["Editorial issues", str(len(editorial_rows))],
+        ["Fact check issues", str(len(fact_rows))],
+    ]
+
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        rightMargin=1.2 * cm,
+        leftMargin=1.2 * cm,
+        topMargin=1.2 * cm,
+        bottomMargin=1.2 * cm,
+    )
+
+    story = [
+        Paragraph("English QC Report", title_style),
+        Spacer(1, 0.25 * cm),
+    ]
+
+    add_table(story, "Summary", ["Field", "Value"], summary_rows, [4.2 * cm, 12.4 * cm])
+    add_table(story, "Spelling Issues", ["Original", "Corrected", "Reason"], spelling_rows, [6.0 * cm, 6.0 * cm, 4.6 * cm])
+    add_table(story, "Grammar Issues", ["Original", "Corrected", "Reason"], grammar_rows, [6.0 * cm, 6.0 * cm, 4.6 * cm])
+    add_table(story, "Gemini Editorial Review", ["Issue", "Location", "Suggestion"], editorial_rows, [4.6 * cm, 3.0 * cm, 9.0 * cm])
+    add_table(story, "Fact Check", ["Statement", "Issue", "Correct Fact"], fact_rows, [6.0 * cm, 4.0 * cm, 6.6 * cm])
+
+    doc.build(story)
+    return buffer.getvalue(), None
+
 # =============================
 # Is structural Inline
 # =============================
@@ -1938,6 +2193,7 @@ if st.sidebar.button("Clear cached AI outputs"):
         "analysis_start",
         "article_content",
         "input_key",
+        "source_label",
     ):
         st.session_state.pop(key, None)
 
@@ -1955,6 +2211,7 @@ if source == "URL":
             article_content = clean_article(url)
             st.session_state["article_content"] = article_content
             st.session_state["input_key"] = current_key
+            st.session_state["source_label"] = url.strip()
             queue_analysis_run("url", current_key, url.strip())
         except Exception as exc:
             st.error(str(exc))
@@ -1973,11 +2230,14 @@ else:
                 article_content = clean_docx(f.name)
             st.session_state["article_content"] = article_content
             st.session_state["input_key"] = current_key
+            st.session_state["source_label"] = uploaded.name or current_key
             queue_analysis_run("docx", current_key, uploaded.name or current_key)
 
 if article_content is None:
     if current_key and st.session_state.get("input_key") == current_key:
         article_content = st.session_state.get("article_content")
+
+source_label = st.session_state.get("source_label", "")
 
 analysis_key = None
 if current_key:
@@ -2004,6 +2264,8 @@ if analysis_ready:
     results = st.session_state.setdefault("analysis_results", {})
     if "analysis_start" not in results:
         results["analysis_start"] = st.session_state.get("analysis_start", time.perf_counter())
+    report_pdf_bytes = None
+    report_pdf_error = None
 
     # ---------- FINAL ARTICLE ----------
     st.subheader("📄 Final Article")
@@ -2123,6 +2385,28 @@ if analysis_ready:
             elif key == "fact":
                 results["fact_result"] = result
                 render_fact(result)
+
+    clean_grammar_md = filter_invalid_rows(results.get("grammar_raw", ""), article_text) if "grammar_raw" in results else ""
+    spelling_md, grammar_md = split_spelling_grammar(clean_grammar_md) if clean_grammar_md else ("", "")
+
+    report_pdf_bytes, report_pdf_error = build_english_qc_report_pdf(
+        source_label or (url.strip() if source == "URL" and url else current_key or "QC Report"),
+        _current_access_email(),
+        spelling_md,
+        grammar_md,
+        results.get("gemini_editorial", "") if run_gemini_editorial else "",
+        results.get("fact_result", ""),
+    )
+
+    if report_pdf_bytes:
+        st.download_button(
+            "Download QC Report (PDF)",
+            data=report_pdf_bytes,
+            file_name=f"english_qc_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+            mime="application/pdf",
+        )
+    elif report_pdf_error:
+        st.caption(f"PDF report unavailable: {report_pdf_error}")
 
     required_keys = {"grammar_raw", "fact_result"}
     if run_gemini_editorial:
