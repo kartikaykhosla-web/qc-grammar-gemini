@@ -113,9 +113,12 @@ def _utc_now():
 def _hash_session_token(token: str) -> str:
     return hashlib.sha256(f"{ALLOWED_EMAIL_DOMAIN}:{token}".encode("utf-8")).hexdigest()
 
-@st.cache_resource
 def _get_cookie_manager():
-    return stx.CookieManager()
+    manager = st.session_state.get("_cookie_manager")
+    if manager is None:
+        manager = stx.CookieManager()
+        st.session_state["_cookie_manager"] = manager
+    return manager
 
 def _get_session_query_token() -> str:
     try:
