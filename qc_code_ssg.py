@@ -24,7 +24,9 @@ from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from bs4 import BeautifulSoup
 from google.oauth2 import service_account
+from google.auth.transport.requests import Request as GoogleAuthRequest
 from difflib import SequenceMatcher
+from urllib.parse import quote
 
 
 # ===================== NLP =====================
@@ -68,9 +70,40 @@ APP_ACCESS_SUPPORT_TEXT = str(
 ).strip()
 ADMIN_EMAIL = "kartikay.khosla@jagrannewmedia.com"
 HISTORY_DB_PATH = os.path.join(os.path.dirname(__file__), ".app_history.sqlite3")
+HISTORY_SPREADSHEET_ID = str(_secret("HISTORY_SPREADSHEET_ID", "")).strip()
 SESSION_QUERY_KEY = "_jnm_session"
 SESSION_COOKIE_KEY = "_jnm_session"
 SESSION_TTL_HOURS = 24
+SESSION_REFRESH_WINDOW_MINUTES = 15
+
+HISTORY_HEADERS = {
+    "login_events": ["ts_utc", "app", "email"],
+    "analysis_runs": [
+        "run_id",
+        "ts_utc",
+        "app",
+        "email",
+        "source_type",
+        "source_identity",
+        "source_label",
+        "analysis_key",
+        "iteration",
+        "spelling_count",
+        "grammar_count",
+        "editorial_count",
+        "fact_count",
+        "total_count",
+    ],
+    "access_sessions": [
+        "ts_utc",
+        "app",
+        "token_hash",
+        "email",
+        "event_type",
+        "expires_ts_utc",
+        "last_seen_ts_utc",
+    ],
+}
 
 def _email_allowed(email: str) -> bool:
     return (email or "").strip().lower().endswith(f"@{ALLOWED_EMAIL_DOMAIN}")
@@ -106,6 +139,37 @@ def _history_conn():
     conn = sqlite3.connect(HISTORY_DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
+
+def _history_uses_sheets() -> bool:
+    return bool(HISTORY_SPREADSHEET_ID)
+
+def _sheet_tab_title(app_name: str, kind: str) -> str:
+    safe_app = re.sub(r"[^A-Za-z0-9_\\-]", "_", app_name or "app").strip("_") or "app"
+    safe_kind = re.sub(r"[^A-Za-z0-9_\\-]", "_", kind or "history").strip("_") or "history"
+    return f"{safe_app}_{safe_kind}"[:95]
+
+def _history_headers(kind: str):
+    return HISTORY_HEADERS.get(kind, [])
+
+def _parse_utc_iso(value: str):
+    text = (value or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+def _safe_int(value, default=0):
+    try:
+        return int(value)
+    except Exception:
+        return default
 
 def _utc_now():
     return datetime.now(timezone.utc)
@@ -164,6 +228,201 @@ def _clear_session_cookie_token():
         _get_cookie_manager().delete(SESSION_COOKIE_KEY, key=f"delete-cookie-{SESSION_COOKIE_KEY}")
     except Exception:
         pass
+
+def _sqlite_rows(query: str, params=()):
+    try:
+        ensure_history_db()
+        with _history_conn() as conn:
+            return [dict(row) for row in conn.execute(query, params).fetchall()]
+    except Exception:
+        return []
+
+def _load_service_account_info():
+    if "GCP_SERVICE_ACCOUNT_JSON_B64" not in st.secrets:
+        st.error("❌ GCP_SERVICE_ACCOUNT_JSON_B64 not set in Streamlit secrets")
+        st.stop()
+    decoded = base64.b64decode(
+        st.secrets["GCP_SERVICE_ACCOUNT_JSON_B64"]
+    ).decode("utf-8")
+    return json.loads(decoded)
+
+def _get_scoped_service_account_credentials(scopes):
+    creds_dict = _load_service_account_info()
+    with open(CRED_PATH, "w") as f:
+        json.dump(creds_dict, f)
+    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = CRED_PATH
+    creds = service_account.Credentials.from_service_account_info(
+        creds_dict,
+        scopes=list(scopes),
+    )
+    project_id = PROJECT_ID or str(creds_dict.get("project_id", "")).strip()
+    if not project_id:
+        st.error("❌ Could not determine Vertex project ID from secrets or service account JSON")
+        st.stop()
+    return creds, project_id, creds_dict
+
+def _sheets_api_request(method: str, path: str = "", params=None, json_body=None):
+    creds, _, _ = _get_scoped_service_account_credentials([CLOUD_PLATFORM_SCOPE, SHEETS_SCOPE])
+    creds.refresh(GoogleAuthRequest())
+    headers = {"Authorization": f"Bearer {creds.token}"}
+    if json_body is not None:
+        headers["Content-Type"] = "application/json"
+    url = f"https://sheets.googleapis.com/v4/spreadsheets/{HISTORY_SPREADSHEET_ID}{path}"
+    response = requests.request(
+        method,
+        url,
+        headers=headers,
+        params=params,
+        json=json_body,
+        timeout=30,
+    )
+    if response.status_code >= 400:
+        raise RuntimeError(f"Google Sheets API {response.status_code}: {response.text}")
+    if not response.text:
+        return {}
+    return response.json()
+
+def _ensure_history_sheet(app_name: str, kind: str) -> str:
+    if not _history_uses_sheets():
+        return ""
+    tab_title = _sheet_tab_title(app_name, kind)
+    metadata = _sheets_api_request("GET", params={"fields": "sheets.properties.title"})
+    titles = {
+        ((sheet.get("properties") or {}).get("title") or "").strip()
+        for sheet in metadata.get("sheets", [])
+    }
+    if tab_title not in titles:
+        _sheets_api_request(
+            "POST",
+            ":batchUpdate",
+            json_body={"requests": [{"addSheet": {"properties": {"title": tab_title}}}]},
+        )
+    headers = _history_headers(kind)
+    encoded_range = quote(f"{tab_title}!1:1", safe="!:$")
+    current = _sheets_api_request("GET", f"/values/{encoded_range}")
+    current_values = current.get("values", [])
+    if not current_values:
+        encoded_write = quote(f"{tab_title}!A1", safe="!:$")
+        _sheets_api_request(
+            "PUT",
+            f"/values/{encoded_write}",
+            params={"valueInputOption": "RAW"},
+            json_body={"range": f"{tab_title}!A1", "majorDimension": "ROWS", "values": [headers]},
+        )
+    return tab_title
+
+def _sheet_read_rows(app_name: str, kind: str):
+    if not _history_uses_sheets():
+        return []
+    try:
+        tab_title = _ensure_history_sheet(app_name, kind)
+        encoded_range = quote(f"{tab_title}!A:Z", safe="!:$")
+        payload = _sheets_api_request("GET", f"/values/{encoded_range}")
+        values = payload.get("values", [])
+        headers = _history_headers(kind)
+        if not values:
+            return []
+        start_index = 1 if values[0] == headers else 0
+        rows = []
+        for raw_row in values[start_index:]:
+            if not any((cell or "").strip() for cell in raw_row):
+                continue
+            padded = list(raw_row) + [""] * max(0, len(headers) - len(raw_row))
+            rows.append({header: padded[idx] if idx < len(padded) else "" for idx, header in enumerate(headers)})
+        return rows
+    except Exception:
+        return []
+
+def _sheet_append_row(app_name: str, kind: str, row_dict: dict) -> bool:
+    if not _history_uses_sheets():
+        return False
+    try:
+        tab_title = _ensure_history_sheet(app_name, kind)
+        headers = _history_headers(kind)
+        encoded_range = quote(f"{tab_title}!A:Z", safe="!:$")
+        _sheets_api_request(
+            "POST",
+            f"/values/{encoded_range}:append",
+            params={"valueInputOption": "RAW", "insertDataOption": "INSERT_ROWS"},
+            json_body={"values": [[str(row_dict.get(header, "")) for header in headers]]},
+        )
+        return True
+    except Exception:
+        return False
+
+def _sheet_login_rows(app_name: str):
+    rows = _sheet_read_rows(app_name, "login_events")
+    return sorted(
+        [
+            {"ts_utc": (row.get("ts_utc") or "").strip(), "email": (row.get("email") or "").strip().lower()}
+            for row in rows
+            if (row.get("email") or "").strip()
+        ],
+        key=lambda row: row.get("ts_utc", ""),
+        reverse=True,
+    )
+
+def _sheet_analysis_rows(app_name: str):
+    rows = []
+    for row in _sheet_read_rows(app_name, "analysis_runs"):
+        ts_value = (row.get("ts_utc") or "").strip()
+        email = (row.get("email") or "").strip().lower()
+        if not ts_value or not email:
+            continue
+        rows.append(
+            {
+                "run_id": (row.get("run_id") or "").strip(),
+                "ts_utc": ts_value,
+                "app": (row.get("app") or "").strip(),
+                "email": email,
+                "source_type": (row.get("source_type") or "").strip(),
+                "source_identity": (row.get("source_identity") or "").strip(),
+                "source_label": (row.get("source_label") or "").strip(),
+                "analysis_key": (row.get("analysis_key") or "").strip(),
+                "iteration": _safe_int(row.get("iteration")),
+                "spelling_count": _safe_int(row.get("spelling_count")),
+                "grammar_count": _safe_int(row.get("grammar_count")),
+                "editorial_count": _safe_int(row.get("editorial_count")),
+                "fact_count": _safe_int(row.get("fact_count")),
+                "total_count": _safe_int(row.get("total_count")),
+            }
+        )
+    return sorted(rows, key=lambda row: row.get("ts_utc", ""), reverse=True)
+
+def _sheet_latest_session_row(app_name: str, token_hash: str):
+    rows = [
+        row
+        for row in _sheet_read_rows(app_name, "access_sessions")
+        if (row.get("token_hash") or "").strip() == token_hash
+    ]
+    if not rows:
+        return None
+    rows.sort(key=lambda row: (row.get("ts_utc") or "", row.get("last_seen_ts_utc") or ""), reverse=True)
+    latest = rows[0]
+    return {
+        "ts_utc": (latest.get("ts_utc") or "").strip(),
+        "app": (latest.get("app") or "").strip(),
+        "token_hash": (latest.get("token_hash") or "").strip(),
+        "email": (latest.get("email") or "").strip().lower(),
+        "event_type": (latest.get("event_type") or "").strip().lower(),
+        "expires_ts_utc": (latest.get("expires_ts_utc") or "").strip(),
+        "last_seen_ts_utc": (latest.get("last_seen_ts_utc") or "").strip(),
+    }
+
+def _append_session_event(app_name: str, token_hash: str, email: str, event_type: str, expires_iso: str, last_seen_iso: str) -> bool:
+    return _sheet_append_row(
+        app_name,
+        "access_sessions",
+        {
+            "ts_utc": _utc_now().isoformat(),
+            "app": app_name,
+            "token_hash": token_hash,
+            "email": (email or "").strip().lower(),
+            "event_type": event_type,
+            "expires_ts_utc": expires_iso,
+            "last_seen_ts_utc": last_seen_iso,
+        },
+    )
 
 def ensure_history_db():
     try:
@@ -237,19 +496,24 @@ def _clear_pending_analysis_state():
 
 def _create_persisted_session(app_name: str, email: str):
     try:
-        ensure_history_db()
         token = uuid.uuid4().hex + uuid.uuid4().hex
         now_iso = _utc_now().isoformat()
         expires_iso = (_utc_now() + timedelta(hours=SESSION_TTL_HOURS)).isoformat()
-        with _history_conn() as conn:
-            conn.execute(
-                """
-                INSERT INTO access_sessions (
-                    token_hash, app, email, created_ts_utc, expires_ts_utc, revoked, last_seen_ts_utc
-                ) VALUES (?, ?, ?, ?, ?, 0, ?)
-                """,
-                (_hash_session_token(token), app_name, (email or "").strip().lower(), now_iso, expires_iso, now_iso),
-            )
+        token_hash = _hash_session_token(token)
+        stored = False
+        if _history_uses_sheets():
+            stored = _append_session_event(app_name, token_hash, email, "create", expires_iso, now_iso)
+        if not stored:
+            ensure_history_db()
+            with _history_conn() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO access_sessions (
+                        token_hash, app, email, created_ts_utc, expires_ts_utc, revoked, last_seen_ts_utc
+                    ) VALUES (?, ?, ?, ?, ?, 0, ?)
+                    """,
+                    (token_hash, app_name, (email or "").strip().lower(), now_iso, expires_iso, now_iso),
+                )
         _set_session_query_token(token)
         _set_session_cookie_token(token)
     except Exception:
@@ -259,12 +523,24 @@ def _revoke_persisted_session(app_name: str):
     token = _get_session_query_token() or _get_session_cookie_token()
     if token:
         try:
-            ensure_history_db()
-            with _history_conn() as conn:
-                conn.execute(
-                    "UPDATE access_sessions SET revoked = 1 WHERE app = ? AND token_hash = ?",
-                    (app_name, _hash_session_token(token)),
+            token_hash = _hash_session_token(token)
+            stored = False
+            if _history_uses_sheets():
+                stored = _append_session_event(
+                    app_name,
+                    token_hash,
+                    _current_access_email(),
+                    "revoke",
+                    _utc_now().isoformat(),
+                    _utc_now().isoformat(),
                 )
+            if not stored:
+                ensure_history_db()
+                with _history_conn() as conn:
+                    conn.execute(
+                        "UPDATE access_sessions SET revoked = 1 WHERE app = ? AND token_hash = ?",
+                        (app_name, token_hash),
+                    )
         except Exception:
             pass
     _clear_session_query_token()
@@ -279,38 +555,68 @@ def _restore_persisted_session(app_name: str) -> bool:
         return False
 
     try:
-        ensure_history_db()
         now_iso = _utc_now().isoformat()
-        with _history_conn() as conn:
-            row = conn.execute(
-                """
-                SELECT email
-                FROM access_sessions
-                WHERE app = ?
-                  AND token_hash = ?
-                  AND revoked = 0
-                  AND expires_ts_utc > ?
-                ORDER BY id DESC
-                LIMIT 1
-                """,
-                (app_name, _hash_session_token(token), now_iso),
-            ).fetchone()
+        token_hash = _hash_session_token(token)
+        row = None
+        if _history_uses_sheets():
+            row = _sheet_latest_session_row(app_name, token_hash)
             if not row:
                 _clear_session_query_token()
                 _clear_session_cookie_token()
                 return False
-
+            if row.get("event_type") == "revoke":
+                _clear_session_query_token()
+                _clear_session_cookie_token()
+                return False
+            expires_at = _parse_utc_iso(row.get("expires_ts_utc", ""))
+            if not expires_at or expires_at <= _utc_now():
+                _clear_session_query_token()
+                _clear_session_cookie_token()
+                return False
             refreshed_expiry = (_utc_now() + timedelta(hours=SESSION_TTL_HOURS)).isoformat()
-            conn.execute(
-                """
-                UPDATE access_sessions
-                SET last_seen_ts_utc = ?, expires_ts_utc = ?
-                WHERE app = ? AND token_hash = ?
-                """,
-                (now_iso, refreshed_expiry, app_name, _hash_session_token(token)),
-            )
+            last_seen = _parse_utc_iso(row.get("last_seen_ts_utc", ""))
+            if (not last_seen) or ((_utc_now() - last_seen) >= timedelta(minutes=SESSION_REFRESH_WINDOW_MINUTES)):
+                _append_session_event(
+                    app_name,
+                    token_hash,
+                    row.get("email", ""),
+                    "refresh",
+                    refreshed_expiry,
+                    now_iso,
+                )
+        else:
+            ensure_history_db()
+            with _history_conn() as conn:
+                sqlite_row = conn.execute(
+                    """
+                    SELECT email
+                    FROM access_sessions
+                    WHERE app = ?
+                      AND token_hash = ?
+                      AND revoked = 0
+                      AND expires_ts_utc > ?
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (app_name, token_hash, now_iso),
+                ).fetchone()
+                if not sqlite_row:
+                    _clear_session_query_token()
+                    _clear_session_cookie_token()
+                    return False
 
-        email = (row["email"] or "").strip().lower()
+                refreshed_expiry = (_utc_now() + timedelta(hours=SESSION_TTL_HOURS)).isoformat()
+                conn.execute(
+                    """
+                    UPDATE access_sessions
+                    SET last_seen_ts_utc = ?, expires_ts_utc = ?
+                    WHERE app = ? AND token_hash = ?
+                    """,
+                    (now_iso, refreshed_expiry, app_name, token_hash),
+                )
+            row = {"email": sqlite_row["email"]}
+
+        email = (row.get("email") or "").strip().lower()
         if not _email_allowed(email):
             _clear_session_query_token()
             _clear_session_cookie_token()
@@ -333,12 +639,19 @@ def queue_analysis_run(source_type: str, source_identity: str, source_label: str
 
 def _record_access_event(app_name: str, email: str):
     try:
-        ensure_history_db()
-        with _history_conn() as conn:
-            conn.execute(
-                "INSERT INTO login_events (ts_utc, app, email) VALUES (?, ?, ?)",
-                (datetime.now(timezone.utc).isoformat(), app_name, (email or "").strip().lower()),
-            )
+        row = {
+            "ts_utc": datetime.now(timezone.utc).isoformat(),
+            "app": app_name,
+            "email": (email or "").strip().lower(),
+        }
+        stored = _sheet_append_row(app_name, "login_events", row) if _history_uses_sheets() else False
+        if not stored:
+            ensure_history_db()
+            with _history_conn() as conn:
+                conn.execute(
+                    "INSERT INTO login_events (ts_utc, app, email) VALUES (?, ?, ?)",
+                    (row["ts_utc"], row["app"], row["email"]),
+                )
     except Exception:
         pass
 
@@ -358,6 +671,31 @@ def count_markdown_rows(table_md: str, header_name: str) -> int:
         count += 1
     return count
 
+def compute_qc_score(spelling_count: int, grammar_count: int, editorial_count: int, fact_count: int) -> int:
+    weighted_penalty = (
+        float(spelling_count) * 0.5
+        + float(grammar_count) * 1.0
+        + float(editorial_count) * 0.75
+        + float(fact_count) * 4.0
+    )
+    return max(0, min(100, int(round(100 - min(100, weighted_penalty)))))
+
+def render_qc_score_summary(spelling_count: int, grammar_count: int, editorial_count: int, fact_count: int, has_ai_error: bool):
+    st.markdown("### QC Summary")
+    if has_ai_error:
+        st.warning("QC score is unavailable because one or more AI checks failed.")
+        return
+    total_count = spelling_count + grammar_count + editorial_count + fact_count
+    score = compute_qc_score(spelling_count, grammar_count, editorial_count, fact_count)
+    score_col, spelling_col, grammar_col, editorial_col, fact_col, total_col = st.columns(6)
+    score_col.metric("QC Score", f"{score}/100")
+    spelling_col.metric("Spelling", spelling_count)
+    grammar_col.metric("Grammar", grammar_count)
+    editorial_col.metric("Editorial", editorial_count)
+    fact_col.metric("Fact", fact_count)
+    total_col.metric("Total Issues", total_count)
+    st.caption("QC score is a weighted indicator based on issue counts. Fact issues carry the highest penalty.")
+
 def log_analysis_run(app_name: str, email: str, source_type: str, source_identity: str, source_label: str,
                      analysis_key: str, spelling_count: int, grammar_count: int,
                      editorial_count: int, fact_count: int):
@@ -366,156 +704,242 @@ def log_analysis_run(app_name: str, email: str, source_type: str, source_identit
         return
 
     try:
-        ensure_history_db()
-        with _history_conn() as conn:
-            exists = conn.execute(
-                "SELECT 1 FROM analysis_runs WHERE run_id = ?",
-                (run_id,),
-            ).fetchone()
-            if exists:
+        ts_utc = datetime.now(timezone.utc).isoformat()
+        if _history_uses_sheets():
+            existing_rows = _sheet_analysis_rows(app_name)
+            if any((row.get("run_id") or "").strip() == run_id for row in existing_rows):
                 _clear_pending_analysis_state()
                 return
-
-            iteration = conn.execute(
-                "SELECT COALESCE(MAX(iteration), 0) + 1 FROM analysis_runs WHERE app = ? AND source_identity = ?",
-                (app_name, source_identity),
-            ).fetchone()[0]
-
-            conn.execute(
-                """
-                INSERT INTO analysis_runs (
-                    run_id, ts_utc, app, email, source_type, source_identity, source_label,
-                    analysis_key, iteration, spelling_count, grammar_count, editorial_count,
-                    fact_count, total_count
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    run_id,
-                    datetime.now(timezone.utc).isoformat(),
-                    app_name,
-                    (email or "").strip().lower(),
-                    source_type,
-                    source_identity,
-                    source_label,
-                    analysis_key,
-                    iteration,
-                    int(spelling_count),
-                    int(grammar_count),
-                    int(editorial_count),
-                    int(fact_count),
-                    int(spelling_count + grammar_count + editorial_count + fact_count),
-                ),
+            iteration = max(
+                [row.get("iteration", 0) for row in existing_rows if (row.get("source_identity") or "") == source_identity] or [0]
+            ) + 1
+            stored = _sheet_append_row(
+                app_name,
+                "analysis_runs",
+                {
+                    "run_id": run_id,
+                    "ts_utc": ts_utc,
+                    "app": app_name,
+                    "email": (email or "").strip().lower(),
+                    "source_type": source_type,
+                    "source_identity": source_identity,
+                    "source_label": source_label,
+                    "analysis_key": analysis_key,
+                    "iteration": iteration,
+                    "spelling_count": int(spelling_count),
+                    "grammar_count": int(grammar_count),
+                    "editorial_count": int(editorial_count),
+                    "fact_count": int(fact_count),
+                    "total_count": int(spelling_count + grammar_count + editorial_count + fact_count),
+                },
             )
+            if not stored:
+                raise RuntimeError("sheets-write-failed")
+        else:
+            ensure_history_db()
+            with _history_conn() as conn:
+                exists = conn.execute(
+                    "SELECT 1 FROM analysis_runs WHERE run_id = ?",
+                    (run_id,),
+                ).fetchone()
+                if exists:
+                    _clear_pending_analysis_state()
+                    return
+
+                iteration = conn.execute(
+                    "SELECT COALESCE(MAX(iteration), 0) + 1 FROM analysis_runs WHERE app = ? AND source_identity = ?",
+                    (app_name, source_identity),
+                ).fetchone()[0]
+
+                conn.execute(
+                    """
+                    INSERT INTO analysis_runs (
+                        run_id, ts_utc, app, email, source_type, source_identity, source_label,
+                        analysis_key, iteration, spelling_count, grammar_count, editorial_count,
+                        fact_count, total_count
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        run_id,
+                        ts_utc,
+                        app_name,
+                        (email or "").strip().lower(),
+                        source_type,
+                        source_identity,
+                        source_label,
+                        analysis_key,
+                        iteration,
+                        int(spelling_count),
+                        int(grammar_count),
+                        int(editorial_count),
+                        int(fact_count),
+                        int(spelling_count + grammar_count + editorial_count + fact_count),
+                    ),
+                )
         _clear_pending_analysis_state()
     except Exception:
         pass
 
 def _fetch_rows(query: str, params=()):
-    try:
-        ensure_history_db()
-        with _history_conn() as conn:
-            return [dict(row) for row in conn.execute(query, params).fetchall()]
-    except Exception:
-        return []
+    return _sqlite_rows(query, params)
 
 def render_admin_dashboard(app_name: str):
     st.divider()
     with st.expander("Admin History", expanded=False):
-        daily_rows = _fetch_rows(
-            """
-            WITH login_daily AS (
+        if _history_uses_sheets():
+            login_rows = _sheet_login_rows(app_name)[:200]
+            all_analysis_rows = _sheet_analysis_rows(app_name)
+            recent_rows = [
+                {
+                    "ts_utc": row["ts_utc"],
+                    "email": row["email"],
+                    "source_type": row["source_type"],
+                    "source_label": row["source_label"],
+                    "iteration": row["iteration"],
+                    "spelling_count": row["spelling_count"],
+                    "grammar_count": row["grammar_count"],
+                    "editorial_count": row["editorial_count"],
+                    "fact_count": row["fact_count"],
+                    "total_count": row["total_count"],
+                }
+                for row in all_analysis_rows[:200]
+            ]
+
+            daily_map = {}
+            for row in login_rows:
+                date_utc = (row.get("ts_utc") or "")[:10]
+                email = (row.get("email") or "").strip().lower()
+                if not date_utc or not email:
+                    continue
+                entry = daily_map.setdefault(
+                    (date_utc, email),
+                    {
+                        "date_utc": date_utc,
+                        "email": email,
+                        "login_count": 0,
+                        "analyses_run": 0,
+                        "distinct_articles": set(),
+                        "spelling_issues": 0,
+                        "grammar_issues": 0,
+                        "editorial_issues": 0,
+                        "fact_issues": 0,
+                    },
+                )
+                entry["login_count"] += 1
+
+            for row in all_analysis_rows:
+                date_utc = (row.get("ts_utc") or "")[:10]
+                email = (row.get("email") or "").strip().lower()
+                if not date_utc or not email:
+                    continue
+                entry = daily_map.setdefault(
+                    (date_utc, email),
+                    {
+                        "date_utc": date_utc,
+                        "email": email,
+                        "login_count": 0,
+                        "analyses_run": 0,
+                        "distinct_articles": set(),
+                        "spelling_issues": 0,
+                        "grammar_issues": 0,
+                        "editorial_issues": 0,
+                        "fact_issues": 0,
+                    },
+                )
+                entry["analyses_run"] += 1
+                entry["distinct_articles"].add((row.get("source_identity") or "").strip())
+                entry["spelling_issues"] += _safe_int(row.get("spelling_count"))
+                entry["grammar_issues"] += _safe_int(row.get("grammar_count"))
+                entry["editorial_issues"] += _safe_int(row.get("editorial_count"))
+                entry["fact_issues"] += _safe_int(row.get("fact_count"))
+
+            daily_rows = []
+            for entry in daily_map.values():
+                daily_rows.append(
+                    {
+                        "date_utc": entry["date_utc"],
+                        "email": entry["email"],
+                        "login_count": entry["login_count"],
+                        "analyses_run": entry["analyses_run"],
+                        "distinct_articles": len([value for value in entry["distinct_articles"] if value]),
+                        "spelling_issues": entry["spelling_issues"],
+                        "grammar_issues": entry["grammar_issues"],
+                        "editorial_issues": entry["editorial_issues"],
+                        "fact_issues": entry["fact_issues"],
+                    }
+                )
+            daily_rows.sort(key=lambda row: (row["date_utc"], row["email"]), reverse=True)
+            daily_rows = daily_rows[:180]
+        else:
+            daily_rows = _fetch_rows(
+                """
+                WITH login_daily AS (
+                    SELECT
+                        substr(ts_utc, 1, 10) AS date_utc,
+                        email,
+                        COUNT(*) AS login_count
+                    FROM login_events
+                    WHERE app = ?
+                    GROUP BY substr(ts_utc, 1, 10), email
+                ),
+                analysis_daily AS (
+                    SELECT
+                        substr(ts_utc, 1, 10) AS date_utc,
+                        email,
+                        COUNT(*) AS analyses_run,
+                        COUNT(DISTINCT source_identity) AS distinct_articles,
+                        COALESCE(SUM(spelling_count), 0) AS spelling_issues,
+                        COALESCE(SUM(grammar_count), 0) AS grammar_issues,
+                        COALESCE(SUM(editorial_count), 0) AS editorial_issues,
+                        COALESCE(SUM(fact_count), 0) AS fact_issues
+                    FROM analysis_runs
+                    WHERE app = ?
+                    GROUP BY substr(ts_utc, 1, 10), email
+                ),
+                combined AS (
+                    SELECT date_utc, email FROM login_daily
+                    UNION
+                    SELECT date_utc, email FROM analysis_daily
+                )
                 SELECT
-                    substr(ts_utc, 1, 10) AS date_utc,
-                    email,
-                    COUNT(*) AS login_count
+                    c.date_utc,
+                    c.email,
+                    COALESCE(l.login_count, 0) AS login_count,
+                    COALESCE(a.analyses_run, 0) AS analyses_run,
+                    COALESCE(a.distinct_articles, 0) AS distinct_articles,
+                    COALESCE(a.spelling_issues, 0) AS spelling_issues,
+                    COALESCE(a.grammar_issues, 0) AS grammar_issues,
+                    COALESCE(a.editorial_issues, 0) AS editorial_issues,
+                    COALESCE(a.fact_issues, 0) AS fact_issues
+                FROM combined c
+                LEFT JOIN login_daily l
+                  ON l.date_utc = c.date_utc AND l.email = c.email
+                LEFT JOIN analysis_daily a
+                  ON a.date_utc = c.date_utc AND a.email = c.email
+                ORDER BY c.date_utc DESC, c.email ASC
+                LIMIT 180
+                """,
+                (app_name, app_name),
+            )
+
+            login_rows = _fetch_rows(
+                """
+                SELECT ts_utc, email
                 FROM login_events
                 WHERE app = ?
-                GROUP BY substr(ts_utc, 1, 10), email
-            ),
-            analysis_daily AS (
-                SELECT
-                    substr(ts_utc, 1, 10) AS date_utc,
-                    email,
-                    COUNT(*) AS analyses_run,
-                    COUNT(DISTINCT source_identity) AS distinct_articles,
-                    COALESCE(SUM(spelling_count), 0) AS spelling_issues,
-                    COALESCE(SUM(grammar_count), 0) AS grammar_issues,
-                    COALESCE(SUM(editorial_count), 0) AS editorial_issues,
-                    COALESCE(SUM(fact_count), 0) AS fact_issues
-                FROM analysis_runs
-                WHERE app = ?
-                GROUP BY substr(ts_utc, 1, 10), email
-            ),
-            combined AS (
-                SELECT date_utc, email FROM login_daily
-                UNION
-                SELECT date_utc, email FROM analysis_daily
+                ORDER BY ts_utc DESC
+                LIMIT 200
+                """,
+                (app_name,),
             )
-            SELECT
-                c.date_utc,
-                c.email,
-                COALESCE(l.login_count, 0) AS login_count,
-                COALESCE(a.analyses_run, 0) AS analyses_run,
-                COALESCE(a.distinct_articles, 0) AS distinct_articles,
-                COALESCE(a.spelling_issues, 0) AS spelling_issues,
-                COALESCE(a.grammar_issues, 0) AS grammar_issues,
-                COALESCE(a.editorial_issues, 0) AS editorial_issues,
-                COALESCE(a.fact_issues, 0) AS fact_issues
-            FROM combined c
-            LEFT JOIN login_daily l
-              ON l.date_utc = c.date_utc AND l.email = c.email
-            LEFT JOIN analysis_daily a
-              ON a.date_utc = c.date_utc AND a.email = c.email
-            ORDER BY c.date_utc DESC, c.email ASC
-            LIMIT 180
-            """,
-            (app_name, app_name),
-        )
 
-        login_rows = _fetch_rows(
-            """
-            SELECT ts_utc, email
-            FROM login_events
-            WHERE app = ?
-            ORDER BY ts_utc DESC
-            LIMIT 200
-            """,
-            (app_name,),
-        )
-
-        recent_rows = _fetch_rows(
-            """
-            SELECT
-                ts_utc,
-                email,
-                source_type,
-                source_label,
-                iteration,
-                spelling_count,
-                grammar_count,
-                editorial_count,
-                fact_count,
-                total_count
-            FROM analysis_runs
-            WHERE app = ?
-            ORDER BY ts_utc DESC
-            LIMIT 200
-            """,
-            (app_name,),
-        )
-
-        source_search = st.text_input("Search article or document", key=f"{app_name}_history_search")
-        search_rows = []
-        if source_search:
-            like = f"%{source_search.strip()}%"
-            search_rows = _fetch_rows(
+            recent_rows = _fetch_rows(
                 """
                 SELECT
                     ts_utc,
                     email,
                     source_type,
                     source_label,
-                    source_identity,
                     iteration,
                     spelling_count,
                     grammar_count,
@@ -524,12 +948,59 @@ def render_admin_dashboard(app_name: str):
                     total_count
                 FROM analysis_runs
                 WHERE app = ?
-                  AND (source_label LIKE ? OR source_identity LIKE ?)
                 ORDER BY ts_utc DESC
                 LIMIT 200
                 """,
-                (app_name, like, like),
+                (app_name,),
             )
+
+        source_search = st.text_input("Search article or document", key=f"{app_name}_history_search")
+        search_rows = []
+        if source_search:
+            if _history_uses_sheets():
+                needle = source_search.strip().lower()
+                search_rows = [
+                    {
+                        "ts_utc": row["ts_utc"],
+                        "email": row["email"],
+                        "source_type": row["source_type"],
+                        "source_label": row["source_label"],
+                        "source_identity": row["source_identity"],
+                        "iteration": row["iteration"],
+                        "spelling_count": row["spelling_count"],
+                        "grammar_count": row["grammar_count"],
+                        "editorial_count": row["editorial_count"],
+                        "fact_count": row["fact_count"],
+                        "total_count": row["total_count"],
+                    }
+                    for row in all_analysis_rows
+                    if needle in (row.get("source_label") or "").lower()
+                    or needle in (row.get("source_identity") or "").lower()
+                ][:200]
+            else:
+                like = f"%{source_search.strip()}%"
+                search_rows = _fetch_rows(
+                    """
+                    SELECT
+                        ts_utc,
+                        email,
+                        source_type,
+                        source_label,
+                        source_identity,
+                        iteration,
+                        spelling_count,
+                        grammar_count,
+                        editorial_count,
+                        fact_count,
+                        total_count
+                    FROM analysis_runs
+                    WHERE app = ?
+                      AND (source_label LIKE ? OR source_identity LIKE ?)
+                    ORDER BY ts_utc DESC
+                    LIMIT 200
+                    """,
+                    (app_name, like, like),
+                )
 
         st.markdown("#### Daily Summary")
         if daily_rows:
@@ -608,36 +1079,17 @@ CRED_PATH = "/tmp/gcp_service_account.json"
 MODEL_PRO = "gemini-2.5-pro"
 MODEL_FLASH = "gemini-2.5-flash"
 CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
+SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets"
 
 
 def load_gcp_credentials():
-    if "GCP_SERVICE_ACCOUNT_JSON_B64" not in st.secrets:
-        st.error("❌ GCP_SERVICE_ACCOUNT_JSON_B64 not set in Streamlit secrets")
-        st.stop()
-
     try:
-        decoded = base64.b64decode(
-            st.secrets["GCP_SERVICE_ACCOUNT_JSON_B64"]
-        ).decode("utf-8")
-        creds_dict = json.loads(decoded)
+        creds, project_id, _ = _get_scoped_service_account_credentials([CLOUD_PLATFORM_SCOPE])
+        return creds, project_id
     except Exception as e:
         st.error("❌ Invalid Base64 GCP credential")
         st.exception(e)
         st.stop()
-
-    with open(CRED_PATH, "w") as f:
-        json.dump(creds_dict, f)
-
-    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = CRED_PATH
-    creds = service_account.Credentials.from_service_account_info(
-        creds_dict,
-        scopes=[CLOUD_PLATFORM_SCOPE],
-    )
-    project_id = PROJECT_ID or str(creds_dict.get("project_id", "")).strip()
-    if not project_id:
-        st.error("❌ Could not determine Vertex project ID from secrets or service account JSON")
-        st.stop()
-    return creds, project_id
 
 @st.cache_resource
 def init_vertex_and_model():
@@ -2315,6 +2767,7 @@ if analysis_ready:
 
     # ---------- GEMINI QC ----------
     st.subheader("🤖 Gemini QC Review")
+    score_placeholder = st.empty()
 
     article_text = "\n".join(
         t for c, t in article_content if c == "paragraph"
@@ -2427,6 +2880,26 @@ if analysis_ready:
 
     clean_grammar_md = filter_invalid_rows(results.get("grammar_raw", ""), article_text) if "grammar_raw" in results else ""
     spelling_md, grammar_md = split_spelling_grammar(clean_grammar_md) if clean_grammar_md else ("", "")
+    spelling_count = count_markdown_rows(spelling_md, "Original")
+    grammar_count = count_markdown_rows(grammar_md, "Original")
+    editorial_count = count_markdown_rows(results.get("gemini_editorial", ""), "Issue") if run_gemini_editorial else 0
+    fact_count = count_markdown_rows(results.get("fact_result", ""), "Statement")
+    has_ai_error = any(
+        is_ai_error_output(value)
+        for value in (
+            results.get("grammar_raw", ""),
+            results.get("gemini_editorial", "") if run_gemini_editorial else "",
+            results.get("fact_result", ""),
+        )
+    )
+    with score_placeholder.container():
+        render_qc_score_summary(
+            spelling_count,
+            grammar_count,
+            editorial_count,
+            fact_count,
+            has_ai_error,
+        )
 
     report_pdf_bytes, report_pdf_error = build_english_qc_report_pdf(
         source_label or (url.strip() if source == "URL" and url else current_key or "QC Report"),
@@ -2460,10 +2933,10 @@ if analysis_ready:
             st.session_state.get("_pending_source_identity", current_key or ""),
             st.session_state.get("_pending_source_label", url.strip() if source == "URL" and url else ""),
             st.session_state.get("_pending_analysis_key", analysis_key or ""),
-            count_markdown_rows(split_spelling_grammar(filter_invalid_rows(results.get("grammar_raw", ""), article_text))[0], "Original"),
-            count_markdown_rows(split_spelling_grammar(filter_invalid_rows(results.get("grammar_raw", ""), article_text))[1], "Original"),
-            count_markdown_rows(results.get("gemini_editorial", ""), "Issue") if run_gemini_editorial else 0,
-            count_markdown_rows(results.get("fact_result", ""), "Statement"),
+            spelling_count,
+            grammar_count,
+            editorial_count,
+            fact_count,
         )
 
     elapsed = results.get("elapsed")
