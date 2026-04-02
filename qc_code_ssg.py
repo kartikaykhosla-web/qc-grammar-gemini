@@ -17,7 +17,27 @@ import sqlite3
 import uuid
 import io
 import streamlit as st
-import extra_streamlit_components as stx
+IMPORT_ONLY = os.environ.get("QC_SSG_IMPORT_ONLY") == "1"
+try:
+    import extra_streamlit_components as stx
+except Exception:
+    if IMPORT_ONLY:
+        class _DummyCookieManager:
+            def get(self, *args, **kwargs):
+                return ""
+
+            def set(self, *args, **kwargs):
+                return None
+
+            def delete(self, *args, **kwargs):
+                return None
+
+        class _DummySTX:
+            CookieManager = _DummyCookieManager
+
+        stx = _DummySTX()
+    else:
+        raise
 import html
 import time
 from datetime import datetime, timezone, timedelta
@@ -53,7 +73,8 @@ from google.genai import types as genai_types
 # =================================================
 # STREAMLIT CONFIG
 # =================================================
-st.set_page_config(page_title="Article QC Tool (Gemini 2.5)", layout="wide")
+if not IMPORT_ONLY:
+    st.set_page_config(page_title="Article QC Tool (Gemini 2.5)", layout="wide")
 
 def _secret(name: str, default=""):
     try:
@@ -73,6 +94,8 @@ HISTORY_DB_PATH = os.path.join(os.path.dirname(__file__), ".app_history.sqlite3"
 HISTORY_SPREADSHEET_ID = str(_secret("HISTORY_SPREADSHEET_ID", "")).strip()
 SESSION_QUERY_KEY = "_jnm_session"
 SESSION_COOKIE_KEY = "_jnm_session"
+SESSION_EMAIL_COOKIE_KEY = "_jnm_email"
+SESSION_EXP_COOKIE_KEY = "_jnm_session_exp"
 SESSION_TTL_HOURS = 24
 SESSION_REFRESH_WINDOW_MINUTES = 15
 
@@ -184,6 +207,43 @@ def _get_cookie_manager():
         st.session_state["_cookie_manager"] = manager
     return manager
 
+def _get_context_cookie(name: str) -> str:
+    try:
+        cookies = getattr(st.context, "cookies", None)
+        if cookies is None:
+            return ""
+        value = cookies.get(name, "")
+        return (value or "").strip()
+    except Exception:
+        return ""
+
+def _get_cookie_value(name: str) -> str:
+    value = _get_context_cookie(name)
+    if value:
+        return value
+    try:
+        value = _get_cookie_manager().get(name)
+        return (value or "").strip()
+    except Exception:
+        return ""
+
+def _set_cookie_value(name: str, value: str):
+    try:
+        _get_cookie_manager().set(
+            name,
+            value,
+            expires_at=datetime.now() + timedelta(hours=SESSION_TTL_HOURS),
+            key=f"set-cookie-{name}",
+        )
+    except Exception:
+        pass
+
+def _clear_cookie_value(name: str):
+    try:
+        _get_cookie_manager().delete(name, key=f"delete-cookie-{name}")
+    except Exception:
+        pass
+
 def _get_session_query_token() -> str:
     try:
         value = st.query_params.get(SESSION_QUERY_KEY, "")
@@ -206,28 +266,39 @@ def _clear_session_query_token():
         pass
 
 def _get_session_cookie_token() -> str:
-    try:
-        value = _get_cookie_manager().get(SESSION_COOKIE_KEY)
-        return (value or "").strip()
-    except Exception:
-        return ""
+    return _get_cookie_value(SESSION_COOKIE_KEY)
 
 def _set_session_cookie_token(token: str):
-    try:
-        _get_cookie_manager().set(
-            SESSION_COOKIE_KEY,
-            token,
-            expires_at=datetime.now() + timedelta(hours=SESSION_TTL_HOURS),
-            key=f"set-cookie-{SESSION_COOKIE_KEY}",
-        )
-    except Exception:
-        pass
+    _set_cookie_value(SESSION_COOKIE_KEY, token)
 
 def _clear_session_cookie_token():
-    try:
-        _get_cookie_manager().delete(SESSION_COOKIE_KEY, key=f"delete-cookie-{SESSION_COOKIE_KEY}")
-    except Exception:
-        pass
+    _clear_cookie_value(SESSION_COOKIE_KEY)
+
+def _get_session_identity_cookie_email() -> str:
+    return _get_cookie_value(SESSION_EMAIL_COOKIE_KEY).lower()
+
+def _get_session_identity_cookie_expiry() -> str:
+    return _get_cookie_value(SESSION_EXP_COOKIE_KEY)
+
+def _set_session_identity_cookies(email: str, expires_iso: str):
+    _set_cookie_value(SESSION_EMAIL_COOKIE_KEY, (email or "").strip().lower())
+    _set_cookie_value(SESSION_EXP_COOKIE_KEY, expires_iso)
+
+def _clear_session_identity_cookies():
+    _clear_cookie_value(SESSION_EMAIL_COOKIE_KEY)
+    _clear_cookie_value(SESSION_EXP_COOKIE_KEY)
+
+def _restore_identity_cookie_session() -> bool:
+    email = _get_session_identity_cookie_email()
+    expires_at = _parse_utc_iso(_get_session_identity_cookie_expiry())
+    if not email or not _email_allowed(email) or not expires_at or expires_at <= _utc_now():
+        _clear_session_identity_cookies()
+        return False
+    refreshed_expiry = (_utc_now() + timedelta(hours=SESSION_TTL_HOURS)).isoformat()
+    _set_session_identity_cookies(email, refreshed_expiry)
+    st.session_state["_email_access_granted"] = True
+    st.session_state["_email_access_email"] = email
+    return True
 
 def _sqlite_rows(query: str, params=()):
     try:
@@ -514,13 +585,14 @@ def _create_persisted_session(app_name: str, email: str):
                     """,
                     (token_hash, app_name, (email or "").strip().lower(), now_iso, expires_iso, now_iso),
                 )
-        _set_session_query_token(token)
+        _clear_session_query_token()
         _set_session_cookie_token(token)
+        _set_session_identity_cookies(email, expires_iso)
     except Exception:
         pass
 
 def _revoke_persisted_session(app_name: str):
-    token = _get_session_query_token() or _get_session_cookie_token()
+    token = _get_session_cookie_token() or _get_session_query_token()
     if token:
         try:
             token_hash = _hash_session_token(token)
@@ -545,90 +617,82 @@ def _revoke_persisted_session(app_name: str):
             pass
     _clear_session_query_token()
     _clear_session_cookie_token()
+    _clear_session_identity_cookies()
 
 def _restore_persisted_session(app_name: str) -> bool:
     if _email_access_granted():
         return True
 
-    token = _get_session_query_token() or _get_session_cookie_token()
-    if not token:
-        return False
+    token = _get_session_cookie_token() or _get_session_query_token()
+    if token:
+        try:
+            now_iso = _utc_now().isoformat()
+            token_hash = _hash_session_token(token)
+            row = None
+            if _history_uses_sheets():
+                row = _sheet_latest_session_row(app_name, token_hash)
+                if row and row.get("event_type") != "revoke":
+                    expires_at = _parse_utc_iso(row.get("expires_ts_utc", ""))
+                    if expires_at and expires_at > _utc_now():
+                        refreshed_expiry = (_utc_now() + timedelta(hours=SESSION_TTL_HOURS)).isoformat()
+                        last_seen = _parse_utc_iso(row.get("last_seen_ts_utc", ""))
+                        if (not last_seen) or ((_utc_now() - last_seen) >= timedelta(minutes=SESSION_REFRESH_WINDOW_MINUTES)):
+                            _append_session_event(
+                                app_name,
+                                token_hash,
+                                row.get("email", ""),
+                                "refresh",
+                                refreshed_expiry,
+                                now_iso,
+                            )
+                    else:
+                        row = None
+                else:
+                    row = None
+            else:
+                ensure_history_db()
+                with _history_conn() as conn:
+                    sqlite_row = conn.execute(
+                        """
+                        SELECT email
+                        FROM access_sessions
+                        WHERE app = ?
+                          AND token_hash = ?
+                          AND revoked = 0
+                          AND expires_ts_utc > ?
+                        ORDER BY id DESC
+                        LIMIT 1
+                        """,
+                        (app_name, token_hash, now_iso),
+                    ).fetchone()
+                    if sqlite_row:
+                        refreshed_expiry = (_utc_now() + timedelta(hours=SESSION_TTL_HOURS)).isoformat()
+                        conn.execute(
+                            """
+                            UPDATE access_sessions
+                            SET last_seen_ts_utc = ?, expires_ts_utc = ?
+                            WHERE app = ? AND token_hash = ?
+                            """,
+                            (now_iso, refreshed_expiry, app_name, token_hash),
+                        )
+                        row = {"email": sqlite_row["email"]}
 
-    try:
-        now_iso = _utc_now().isoformat()
-        token_hash = _hash_session_token(token)
-        row = None
-        if _history_uses_sheets():
-            row = _sheet_latest_session_row(app_name, token_hash)
-            if not row:
-                _clear_session_query_token()
-                _clear_session_cookie_token()
-                return False
-            if row.get("event_type") == "revoke":
-                _clear_session_query_token()
-                _clear_session_cookie_token()
-                return False
-            expires_at = _parse_utc_iso(row.get("expires_ts_utc", ""))
-            if not expires_at or expires_at <= _utc_now():
-                _clear_session_query_token()
-                _clear_session_cookie_token()
-                return False
-            refreshed_expiry = (_utc_now() + timedelta(hours=SESSION_TTL_HOURS)).isoformat()
-            last_seen = _parse_utc_iso(row.get("last_seen_ts_utc", ""))
-            if (not last_seen) or ((_utc_now() - last_seen) >= timedelta(minutes=SESSION_REFRESH_WINDOW_MINUTES)):
-                _append_session_event(
-                    app_name,
-                    token_hash,
-                    row.get("email", ""),
-                    "refresh",
-                    refreshed_expiry,
-                    now_iso,
-                )
-        else:
-            ensure_history_db()
-            with _history_conn() as conn:
-                sqlite_row = conn.execute(
-                    """
-                    SELECT email
-                    FROM access_sessions
-                    WHERE app = ?
-                      AND token_hash = ?
-                      AND revoked = 0
-                      AND expires_ts_utc > ?
-                    ORDER BY id DESC
-                    LIMIT 1
-                    """,
-                    (app_name, token_hash, now_iso),
-                ).fetchone()
-                if not sqlite_row:
+            if row:
+                email = (row.get("email") or "").strip().lower()
+                if _email_allowed(email):
+                    refreshed_expiry = (_utc_now() + timedelta(hours=SESSION_TTL_HOURS)).isoformat()
                     _clear_session_query_token()
-                    _clear_session_cookie_token()
-                    return False
+                    _set_session_cookie_token(token)
+                    _set_session_identity_cookies(email, refreshed_expiry)
+                    st.session_state["_email_access_granted"] = True
+                    st.session_state["_email_access_email"] = email
+                    return True
+        except Exception:
+            pass
 
-                refreshed_expiry = (_utc_now() + timedelta(hours=SESSION_TTL_HOURS)).isoformat()
-                conn.execute(
-                    """
-                    UPDATE access_sessions
-                    SET last_seen_ts_utc = ?, expires_ts_utc = ?
-                    WHERE app = ? AND token_hash = ?
-                    """,
-                    (now_iso, refreshed_expiry, app_name, token_hash),
-                )
-            row = {"email": sqlite_row["email"]}
-
-        email = (row.get("email") or "").strip().lower()
-        if not _email_allowed(email):
-            _clear_session_query_token()
-            _clear_session_cookie_token()
-            return False
-
-        _set_session_query_token(token)
-        _set_session_cookie_token(token)
-        st.session_state["_email_access_granted"] = True
-        st.session_state["_email_access_email"] = email
-        return True
-    except Exception:
-        return False
+    _clear_session_query_token()
+    _clear_session_cookie_token()
+    return _restore_identity_cookie_session()
 
 def queue_analysis_run(source_type: str, source_identity: str, source_label: str, analysis_key: str = ""):
     st.session_state["_pending_run_id"] = uuid.uuid4().hex
@@ -1061,13 +1125,14 @@ def enforce_app_access(app_title: str, app_caption: str, app_name: str):
             st.rerun()
     st.stop()
 
-enforce_app_access(
-    "🧪 Article QC Tool (Gemini 2.5 – Vertex AI)",
-    "Spelling · Grammar · Editorial Safety · AI Review",
-    "english_qc",
-)
-st.title("🧪 Article QC Tool (Gemini 2.5 – Vertex AI)")
-st.caption("Spelling · Grammar · Editorial Safety · AI Review")
+if not IMPORT_ONLY:
+    enforce_app_access(
+        "🧪 Article QC Tool (Gemini 2.5 – Vertex AI)",
+        "Spelling · Grammar · Editorial Safety · AI Review",
+        "english_qc",
+    )
+    st.title("🧪 Article QC Tool (Gemini 2.5 – Vertex AI)")
+    st.caption("Spelling · Grammar · Editorial Safety · AI Review")
 
 
 # =================================================
@@ -2664,287 +2729,288 @@ def run_pipeline(content):
 # =================================================
 # STREAMLIT UI
 # =================================================
-st.sidebar.header("Input")
-source = st.sidebar.radio("Source", ["URL", "DOCX"])
-
-st.sidebar.header("QC Options")
-web_story = st.sidebar.checkbox("Web story (no hyperlinks)", value=False)
-health_beauty = st.sidebar.checkbox(
-    "Health/Beauty story (expert quote required)", value=False
-)
-run_gemini_editorial = st.sidebar.checkbox(
-    "Run Gemini editorial QC", value=True
-)
-if st.sidebar.button("Clear cached AI outputs"):
-    st.cache_data.clear()
-    _clear_pending_analysis_state()
-    for key in (
-        "analysis_results",
-        "analysis_key",
-        "analysis_start",
-        "article_content",
-        "input_key",
-        "source_label",
-    ):
-        st.session_state.pop(key, None)
-
-analyze_clicked = st.sidebar.button("Analyze")
-
-article_content = None
-current_key = None
-
-if source == "URL":
-    url = st.sidebar.text_input("Article URL")
-    if url:
-        current_key = f"url:{url.strip()}"
-    if analyze_clicked and url:
-        try:
-            article_content = clean_article(url)
-            st.session_state["article_content"] = article_content
-            st.session_state["input_key"] = current_key
-            st.session_state["source_label"] = url.strip()
-            queue_analysis_run("url", current_key, url.strip())
-        except Exception as exc:
-            st.error(str(exc))
-            article_content = None
-            _clear_pending_analysis_state()
-            st.session_state.pop("article_content", None)
-            st.session_state.pop("input_key", None)
-else:
-    uploaded = st.sidebar.file_uploader("Upload DOCX", type=["docx"])
-    if uploaded:
-        file_bytes = uploaded.getvalue()
-        current_key = "docx:" + hashlib.sha256(file_bytes).hexdigest()
-        if analyze_clicked:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as f:
-                f.write(file_bytes)
-                article_content = clean_docx(f.name)
-            st.session_state["article_content"] = article_content
-            st.session_state["input_key"] = current_key
-            st.session_state["source_label"] = uploaded.name or current_key
-            queue_analysis_run("docx", current_key, uploaded.name or current_key)
-
-if article_content is None:
-    if current_key and st.session_state.get("input_key") == current_key:
-        article_content = st.session_state.get("article_content")
-
-source_label = st.session_state.get("source_label", "")
-
-analysis_key = None
-if current_key:
-    analysis_key = hashlib.sha256(
-        f"{current_key}|{web_story}|{health_beauty}|{run_gemini_editorial}".encode("utf-8")
-    ).hexdigest()
-
-analysis_ready = False
-if article_content and analysis_key:
-    if analyze_clicked:
-        if st.session_state.get("analysis_key") != analysis_key:
-            st.session_state["analysis_key"] = analysis_key
-            st.session_state["analysis_results"] = {}
-            st.session_state["analysis_start"] = time.perf_counter()
-        else:
-            st.info("Using cached results. Clear cached AI outputs to refresh.")
-    if st.session_state.get("analysis_key") == analysis_key:
-        analysis_ready = True
-    else:
-        st.info("Input or options changed. Click Analyze to refresh.")
-
-if analysis_ready:
-    qc_content = run_pipeline(article_content)
-    results = st.session_state.setdefault("analysis_results", {})
-    if "analysis_start" not in results:
-        results["analysis_start"] = st.session_state.get("analysis_start", time.perf_counter())
-    report_pdf_bytes = None
-    report_pdf_error = None
-
-    # ---------- FINAL ARTICLE ----------
-    st.subheader("📄 Final Article")
-    for _, t in qc_content:
-        st.write(t)
-
-    st.divider()
-
-    # ---------- GEMINI QC ----------
-    st.subheader("🤖 Gemini QC Review")
-    score_placeholder = st.empty()
-
-    article_text = "\n".join(
-        t for c, t in article_content if c == "paragraph"
+if not IMPORT_ONLY:
+    source = st.sidebar.radio("Source", ["URL", "DOCX"])
+    
+    st.sidebar.header("QC Options")
+    web_story = st.sidebar.checkbox("Web story (no hyperlinks)", value=False)
+    health_beauty = st.sidebar.checkbox(
+        "Health/Beauty story (expert quote required)", value=False
     )
-    # Grammar + Spelling placeholders
-    st.markdown("### ✍️ Spelling Issues")
-    spelling_placeholder = st.empty()
-    st.markdown("### 🧠 Grammar Issues")
-    grammar_placeholder = st.empty()
-
-    editorial_placeholder = None
-    if run_gemini_editorial:
-        st.markdown("### 🧠 Gemini Editorial Review")
-        editorial_placeholder = st.empty()
-
-    # ---------- FACT CHECK ----------
-    st.markdown("### 📌 Fact Check")
-    fact_placeholder = st.empty()
-
-    def render_grammar(raw_text):
-        if render_ai_error("Spelling/Grammar AI", raw_text, spelling_placeholder):
-            render_ai_error("Spelling/Grammar AI", raw_text, grammar_placeholder)
-            return
-        clean = filter_invalid_rows(raw_text, article_text)
-        spelling_table, grammar_table = split_spelling_grammar(clean)
-        if spelling_table:
-            spelling_placeholder.markdown(
-                render_language_table(spelling_table),
-                unsafe_allow_html=True,
-            )
-        else:
-            spelling_placeholder.success("✅ No spelling issues found")
-        if grammar_table:
-            grammar_placeholder.markdown(
-                render_language_table(grammar_table),
-                unsafe_allow_html=True,
-            )
-        else:
-            grammar_placeholder.success("✅ No grammar issues found")
-
-    def render_fact(fact_text):
-        if render_ai_error("Fact-check AI", fact_text, fact_placeholder):
-            return
-        if not fact_text or "| Statement |" not in fact_text:
-            fact_placeholder.success("✅ No factual issues found")
-        else:
-            fact_placeholder.markdown(fact_text)
-
-    # Show cached results if present
-    if "grammar_raw" in results:
-        render_grammar(results["grammar_raw"])
-    else:
-        spelling_placeholder.info("Running Gemini grammar/spelling...")
-        grammar_placeholder.info("Running Gemini grammar/spelling...")
-
-    if run_gemini_editorial:
-        if "gemini_editorial" in results:
-            if not render_ai_error("Editorial AI", results["gemini_editorial"], editorial_placeholder):
-                editorial_placeholder.markdown(results["gemini_editorial"])
-        else:
-            editorial_placeholder.info("Running Gemini editorial QC...")
-
-    if "fact_result" in results:
-        render_fact(results["fact_result"])
-    else:
-        fact_placeholder.info("Running Gemini fact check...")
-
-    # Run missing AI tasks in parallel
-    tasks = {}
-    with ThreadPoolExecutor(max_workers=3) as executor:
-        if "grammar_raw" not in results:
-            tasks[executor.submit(
-                cached_gemini_grammar_review,
-                qc_content,
-                GRAMMAR_MAX_CHARS
-            )] = "grammar"
-        if run_gemini_editorial and "gemini_editorial" not in results:
-            tasks[executor.submit(
-                cached_gemini_editorial_review,
-                qc_content,
-                web_story,
-                health_beauty
-            )] = "editorial"
-        if "fact_result" not in results:
-            tasks[executor.submit(
-                cached_gemini_fact_check,
-                qc_content,
-                FACT_MAX_CHARS,
-                FACT_MAX_ITEMS
-            )] = "fact"
-
-        for future in as_completed(tasks):
-            key = tasks[future]
+    run_gemini_editorial = st.sidebar.checkbox(
+        "Run Gemini editorial QC", value=True
+    )
+    if st.sidebar.button("Clear cached AI outputs"):
+        st.cache_data.clear()
+        _clear_pending_analysis_state()
+        for key in (
+            "analysis_results",
+            "analysis_key",
+            "analysis_start",
+            "article_content",
+            "input_key",
+            "source_label",
+        ):
+            st.session_state.pop(key, None)
+    
+    analyze_clicked = st.sidebar.button("Analyze")
+    
+    article_content = None
+    current_key = None
+    
+    if source == "URL":
+        url = st.sidebar.text_input("Article URL")
+        if url:
+            current_key = f"url:{url.strip()}"
+        if analyze_clicked and url:
             try:
-                result = future.result()
+                article_content = clean_article(url)
+                st.session_state["article_content"] = article_content
+                st.session_state["input_key"] = current_key
+                st.session_state["source_label"] = url.strip()
+                queue_analysis_run("url", current_key, url.strip())
             except Exception as exc:
-                result = format_ai_error(key, exc)
-
-            if key == "grammar":
-                results["grammar_raw"] = result
-                render_grammar(result)
-            elif key == "editorial":
-                results["gemini_editorial"] = result
-                if editorial_placeholder:
-                    if not render_ai_error("Editorial AI", result, editorial_placeholder):
-                        editorial_placeholder.markdown(result)
-            elif key == "fact":
-                results["fact_result"] = result
-                render_fact(result)
-
-    clean_grammar_md = filter_invalid_rows(results.get("grammar_raw", ""), article_text) if "grammar_raw" in results else ""
-    spelling_md, grammar_md = split_spelling_grammar(clean_grammar_md) if clean_grammar_md else ("", "")
-    spelling_count = count_markdown_rows(spelling_md, "Original")
-    grammar_count = count_markdown_rows(grammar_md, "Original")
-    editorial_count = count_markdown_rows(results.get("gemini_editorial", ""), "Issue") if run_gemini_editorial else 0
-    fact_count = count_markdown_rows(results.get("fact_result", ""), "Statement")
-    has_ai_error = any(
-        is_ai_error_output(value)
-        for value in (
-            results.get("grammar_raw", ""),
+                st.error(str(exc))
+                article_content = None
+                _clear_pending_analysis_state()
+                st.session_state.pop("article_content", None)
+                st.session_state.pop("input_key", None)
+    else:
+        uploaded = st.sidebar.file_uploader("Upload DOCX", type=["docx"])
+        if uploaded:
+            file_bytes = uploaded.getvalue()
+            current_key = "docx:" + hashlib.sha256(file_bytes).hexdigest()
+            if analyze_clicked:
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as f:
+                    f.write(file_bytes)
+                    article_content = clean_docx(f.name)
+                st.session_state["article_content"] = article_content
+                st.session_state["input_key"] = current_key
+                st.session_state["source_label"] = uploaded.name or current_key
+                queue_analysis_run("docx", current_key, uploaded.name or current_key)
+    
+    if article_content is None:
+        if current_key and st.session_state.get("input_key") == current_key:
+            article_content = st.session_state.get("article_content")
+    
+    source_label = st.session_state.get("source_label", "")
+    
+    analysis_key = None
+    if current_key:
+        analysis_key = hashlib.sha256(
+            f"{current_key}|{web_story}|{health_beauty}|{run_gemini_editorial}".encode("utf-8")
+        ).hexdigest()
+    
+    analysis_ready = False
+    if article_content and analysis_key:
+        if analyze_clicked:
+            if st.session_state.get("analysis_key") != analysis_key:
+                st.session_state["analysis_key"] = analysis_key
+                st.session_state["analysis_results"] = {}
+                st.session_state["analysis_start"] = time.perf_counter()
+            else:
+                st.info("Using cached results. Clear cached AI outputs to refresh.")
+        if st.session_state.get("analysis_key") == analysis_key:
+            analysis_ready = True
+        else:
+            st.info("Input or options changed. Click Analyze to refresh.")
+    
+    if analysis_ready:
+        qc_content = run_pipeline(article_content)
+        results = st.session_state.setdefault("analysis_results", {})
+        if "analysis_start" not in results:
+            results["analysis_start"] = st.session_state.get("analysis_start", time.perf_counter())
+        report_pdf_bytes = None
+        report_pdf_error = None
+    
+        # ---------- FINAL ARTICLE ----------
+        st.subheader("📄 Final Article")
+        for _, t in qc_content:
+            st.write(t)
+    
+        st.divider()
+    
+        # ---------- GEMINI QC ----------
+        st.subheader("🤖 Gemini QC Review")
+        score_placeholder = st.empty()
+    
+        article_text = "\n".join(
+            t for c, t in article_content if c == "paragraph"
+        )
+        # Grammar + Spelling placeholders
+        st.markdown("### ✍️ Spelling Issues")
+        spelling_placeholder = st.empty()
+        st.markdown("### 🧠 Grammar Issues")
+        grammar_placeholder = st.empty()
+    
+        editorial_placeholder = None
+        if run_gemini_editorial:
+            st.markdown("### 🧠 Gemini Editorial Review")
+            editorial_placeholder = st.empty()
+    
+        # ---------- FACT CHECK ----------
+        st.markdown("### 📌 Fact Check")
+        fact_placeholder = st.empty()
+    
+        def render_grammar(raw_text):
+            if render_ai_error("Spelling/Grammar AI", raw_text, spelling_placeholder):
+                render_ai_error("Spelling/Grammar AI", raw_text, grammar_placeholder)
+                return
+            clean = filter_invalid_rows(raw_text, article_text)
+            spelling_table, grammar_table = split_spelling_grammar(clean)
+            if spelling_table:
+                spelling_placeholder.markdown(
+                    render_language_table(spelling_table),
+                    unsafe_allow_html=True,
+                )
+            else:
+                spelling_placeholder.success("✅ No spelling issues found")
+            if grammar_table:
+                grammar_placeholder.markdown(
+                    render_language_table(grammar_table),
+                    unsafe_allow_html=True,
+                )
+            else:
+                grammar_placeholder.success("✅ No grammar issues found")
+    
+        def render_fact(fact_text):
+            if render_ai_error("Fact-check AI", fact_text, fact_placeholder):
+                return
+            if not fact_text or "| Statement |" not in fact_text:
+                fact_placeholder.success("✅ No factual issues found")
+            else:
+                fact_placeholder.markdown(fact_text)
+    
+        # Show cached results if present
+        if "grammar_raw" in results:
+            render_grammar(results["grammar_raw"])
+        else:
+            spelling_placeholder.info("Running Gemini grammar/spelling...")
+            grammar_placeholder.info("Running Gemini grammar/spelling...")
+    
+        if run_gemini_editorial:
+            if "gemini_editorial" in results:
+                if not render_ai_error("Editorial AI", results["gemini_editorial"], editorial_placeholder):
+                    editorial_placeholder.markdown(results["gemini_editorial"])
+            else:
+                editorial_placeholder.info("Running Gemini editorial QC...")
+    
+        if "fact_result" in results:
+            render_fact(results["fact_result"])
+        else:
+            fact_placeholder.info("Running Gemini fact check...")
+    
+        # Run missing AI tasks in parallel
+        tasks = {}
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            if "grammar_raw" not in results:
+                tasks[executor.submit(
+                    cached_gemini_grammar_review,
+                    qc_content,
+                    GRAMMAR_MAX_CHARS
+                )] = "grammar"
+            if run_gemini_editorial and "gemini_editorial" not in results:
+                tasks[executor.submit(
+                    cached_gemini_editorial_review,
+                    qc_content,
+                    web_story,
+                    health_beauty
+                )] = "editorial"
+            if "fact_result" not in results:
+                tasks[executor.submit(
+                    cached_gemini_fact_check,
+                    qc_content,
+                    FACT_MAX_CHARS,
+                    FACT_MAX_ITEMS
+                )] = "fact"
+    
+            for future in as_completed(tasks):
+                key = tasks[future]
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    result = format_ai_error(key, exc)
+    
+                if key == "grammar":
+                    results["grammar_raw"] = result
+                    render_grammar(result)
+                elif key == "editorial":
+                    results["gemini_editorial"] = result
+                    if editorial_placeholder:
+                        if not render_ai_error("Editorial AI", result, editorial_placeholder):
+                            editorial_placeholder.markdown(result)
+                elif key == "fact":
+                    results["fact_result"] = result
+                    render_fact(result)
+    
+        clean_grammar_md = filter_invalid_rows(results.get("grammar_raw", ""), article_text) if "grammar_raw" in results else ""
+        spelling_md, grammar_md = split_spelling_grammar(clean_grammar_md) if clean_grammar_md else ("", "")
+        spelling_count = count_markdown_rows(spelling_md, "Original")
+        grammar_count = count_markdown_rows(grammar_md, "Original")
+        editorial_count = count_markdown_rows(results.get("gemini_editorial", ""), "Issue") if run_gemini_editorial else 0
+        fact_count = count_markdown_rows(results.get("fact_result", ""), "Statement")
+        has_ai_error = any(
+            is_ai_error_output(value)
+            for value in (
+                results.get("grammar_raw", ""),
+                results.get("gemini_editorial", "") if run_gemini_editorial else "",
+                results.get("fact_result", ""),
+            )
+        )
+        with score_placeholder.container():
+            render_qc_score_summary(
+                spelling_count,
+                grammar_count,
+                editorial_count,
+                fact_count,
+                has_ai_error,
+            )
+    
+        report_pdf_bytes, report_pdf_error = build_english_qc_report_pdf(
+            source_label or (url.strip() if source == "URL" and url else current_key or "QC Report"),
+            _current_access_email(),
+            spelling_md,
+            grammar_md,
             results.get("gemini_editorial", "") if run_gemini_editorial else "",
             results.get("fact_result", ""),
         )
-    )
-    with score_placeholder.container():
-        render_qc_score_summary(
-            spelling_count,
-            grammar_count,
-            editorial_count,
-            fact_count,
-            has_ai_error,
-        )
-
-    report_pdf_bytes, report_pdf_error = build_english_qc_report_pdf(
-        source_label or (url.strip() if source == "URL" and url else current_key or "QC Report"),
-        _current_access_email(),
-        spelling_md,
-        grammar_md,
-        results.get("gemini_editorial", "") if run_gemini_editorial else "",
-        results.get("fact_result", ""),
-    )
-
-    if report_pdf_bytes:
-        st.download_button(
-            "Download QC Report (PDF)",
-            data=report_pdf_bytes,
-            file_name=f"english_qc_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
-            mime="application/pdf",
-        )
-    elif report_pdf_error:
-        st.caption(f"PDF report unavailable: {report_pdf_error}")
-
-    required_keys = {"grammar_raw", "fact_result"}
-    if run_gemini_editorial:
-        required_keys.add("gemini_editorial")
-
-    if "elapsed" not in results and required_keys.issubset(results.keys()):
-        results["elapsed"] = time.perf_counter() - results["analysis_start"]
-        log_analysis_run(
-            "english_qc",
-            _current_access_email(),
-            st.session_state.get("_pending_source_type", source.lower()),
-            st.session_state.get("_pending_source_identity", current_key or ""),
-            st.session_state.get("_pending_source_label", url.strip() if source == "URL" and url else ""),
-            st.session_state.get("_pending_analysis_key", analysis_key or ""),
-            spelling_count,
-            grammar_count,
-            editorial_count,
-            fact_count,
-        )
-
-    elapsed = results.get("elapsed")
-    if elapsed is not None:
-        minutes = int(elapsed // 60)
-        seconds = int(round(elapsed % 60))
-        st.caption(f"⏱️ Time taken: {minutes}m {seconds:02d}s")
-        st.sidebar.metric("Time taken", f"{minutes}m {seconds:02d}s")
-
-if _is_admin_user():
-    render_admin_dashboard("english_qc")
+    
+        if report_pdf_bytes:
+            st.download_button(
+                "Download QC Report (PDF)",
+                data=report_pdf_bytes,
+                file_name=f"english_qc_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+                mime="application/pdf",
+            )
+        elif report_pdf_error:
+            st.caption(f"PDF report unavailable: {report_pdf_error}")
+    
+        required_keys = {"grammar_raw", "fact_result"}
+        if run_gemini_editorial:
+            required_keys.add("gemini_editorial")
+    
+        if "elapsed" not in results and required_keys.issubset(results.keys()):
+            results["elapsed"] = time.perf_counter() - results["analysis_start"]
+            log_analysis_run(
+                "english_qc",
+                _current_access_email(),
+                st.session_state.get("_pending_source_type", source.lower()),
+                st.session_state.get("_pending_source_identity", current_key or ""),
+                st.session_state.get("_pending_source_label", url.strip() if source == "URL" and url else ""),
+                st.session_state.get("_pending_analysis_key", analysis_key or ""),
+                spelling_count,
+                grammar_count,
+                editorial_count,
+                fact_count,
+            )
+    
+        elapsed = results.get("elapsed")
+        if elapsed is not None:
+            minutes = int(elapsed // 60)
+            seconds = int(round(elapsed % 60))
+            st.caption(f"⏱️ Time taken: {minutes}m {seconds:02d}s")
+            st.sidebar.metric("Time taken", f"{minutes}m {seconds:02d}s")
+    
+    if _is_admin_user():
+        render_admin_dashboard("english_qc")
+    
