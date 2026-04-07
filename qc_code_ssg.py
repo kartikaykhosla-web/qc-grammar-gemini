@@ -2550,7 +2550,7 @@ def extract_fact_statements(article_data):
     seen = set()
 
     for ctype, text in article_data:
-        if ctype != "paragraph":
+        if ctype not in {"heading", "paragraph", "table"}:
             continue
 
         doc = nlp(text)
@@ -2589,7 +2589,7 @@ def chunked(lst, size):
 # FACT CHECK — SECOND PASS (FAST, STREAMING, STABLE)
 # =================================================
 def gemini_fact_check(article_data, max_chars=FACT_MAX_CHARS, max_items=FACT_MAX_ITEMS):
-    init_vertex_and_model()
+    client, _ = init_vertex_and_model()
 
     # 1️⃣ Deterministic statement universe
     statements = extract_fact_statements(article_data)
@@ -2605,24 +2605,33 @@ def gemini_fact_check(article_data, max_chars=FACT_MAX_CHARS, max_items=FACT_MAX
 
     rows = []
     seen = set()
+    had_success = False
+    last_error = None
+    today_iso = datetime.now(timezone.utc).date().isoformat()
 
     def call_batch(batch):
         batch_block = "\n".join(f"- {stmt}" for stmt in batch)
 
         fact_prompt = f"""
-You are a factual accuracy reviewer.
+You are a factual accuracy reviewer for current news copy.
+
+TODAY'S DATE:
+{today_iso}
 
 SCOPE:
-- Use general world knowledge to assess factual accuracy
+- Use Google Search grounding for up-to-date verification
 - Only evaluate statements that appear verbatim in the TEXT
 - Quote the EXACT sentence fragment under "Statement"
 - Do NOT paraphrase, rewrite, or infer
 
 EVALUATION RULES:
+- For present-tense or current-status claims, verify using information available as of today's date
+- For explicitly dated historical claims, judge them against the date or period stated in the article
 - If a statement is likely false, mark Issue as "Likely false" and provide the correct fact
-- If a statement is uncertain or time-sensitive, mark Issue as "Needs verification"
+- If a statement is uncertain or time-sensitive and grounded search is insufficient, mark Issue as "Needs verification (current)"
 - If a statement is likely true, omit it (do NOT create a row)
-- NEVER invent facts; if unsure, use "Needs verification"
+- NEVER invent facts; if unsure, use "Needs verification (current)"
+- Never rely on stale model memory when grounded search is missing or disagrees
 
 DO NOT:
 - Check grammar, spelling, or style
@@ -2639,28 +2648,32 @@ TEXT:
 """
 
         try:
-            return generate_stream_text(
-                fact_prompt,
-                generation_config={
-                    "temperature": 0,
-                    "top_p": 1,
-                    "top_k": 1,
-                    "candidate_count": 1
-                },
-                model_name=MODEL_FLASH,
+            response = client.models.generate_content(
+                model=MODEL_FLASH,
+                contents=fact_prompt,
+                config=genai_types.GenerateContentConfig(
+                    temperature=0,
+                    topP=1,
+                    topK=1,
+                    candidateCount=1,
+                    maxOutputTokens=768,
+                    seed=0,
+                    responseMimeType="text/plain",
+                    tools=[genai_types.Tool(google_search=genai_types.GoogleSearch())],
+                ),
             )
-        except Exception:
-            return ""
+            return response.text or "", None
+        except Exception as exc:
+            return "", exc
 
-    # 2️⃣ Batched + streaming Gemini calls (parallel)
     batch_results = []
-    with ThreadPoolExecutor(max_workers=3) as executor:
-        futures = [executor.submit(call_batch, batch) for batch in batches]
-        for future in as_completed(futures):
-            try:
-                batch_results.append(future.result())
-            except Exception:
-                continue
+    for batch in batches:
+        out, exc = call_batch(batch)
+        if exc is not None:
+            last_error = exc
+            continue
+        had_success = True
+        batch_results.append(out)
 
     for out in batch_results:
         if not out:
@@ -2686,6 +2699,9 @@ TEXT:
 
             seen.add(sig)
             rows.append((s.strip(), issue.strip(), correction.strip()))
+
+    if not rows and not had_success:
+        return format_ai_error("fact", last_error or RuntimeError("No Gemini response"))
 
     if not rows:
         return ""
