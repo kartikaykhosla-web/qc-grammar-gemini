@@ -2303,7 +2303,56 @@ def tokenize_for_diff(text: str):
 def highlight_diff_pair(original: str, corrected: str):
     original_tokens = tokenize_for_diff(original)
     corrected_tokens = tokenize_for_diff(corrected)
-    matcher = SequenceMatcher(a=original_tokens, b=corrected_tokens)
+
+    if normalize_for_equality(original) == normalize_for_equality(corrected):
+        return html.escape(original or ""), html.escape(corrected or "")
+
+    prefix_len = 0
+    max_prefix = min(len(original_tokens), len(corrected_tokens))
+    while prefix_len < max_prefix and original_tokens[prefix_len] == corrected_tokens[prefix_len]:
+        prefix_len += 1
+
+    suffix_len = 0
+    max_suffix = min(len(original_tokens) - prefix_len, len(corrected_tokens) - prefix_len)
+    while (
+        suffix_len < max_suffix
+        and original_tokens[len(original_tokens) - 1 - suffix_len]
+        == corrected_tokens[len(corrected_tokens) - 1 - suffix_len]
+    ):
+        suffix_len += 1
+
+    if prefix_len or suffix_len:
+        original_prefix = "".join(original_tokens[:prefix_len])
+        corrected_prefix = "".join(corrected_tokens[:prefix_len])
+        original_middle = "".join(original_tokens[prefix_len: len(original_tokens) - suffix_len if suffix_len else len(original_tokens)])
+        corrected_middle = "".join(corrected_tokens[prefix_len: len(corrected_tokens) - suffix_len if suffix_len else len(corrected_tokens)])
+        original_suffix = "".join(original_tokens[len(original_tokens) - suffix_len:]) if suffix_len else ""
+        corrected_suffix = "".join(corrected_tokens[len(corrected_tokens) - suffix_len:]) if suffix_len else ""
+
+        original_middle_words = len(re.findall(r"\w+", original_middle, flags=re.UNICODE))
+        corrected_middle_words = len(re.findall(r"\w+", corrected_middle, flags=re.UNICODE))
+        use_compact_highlight = (
+            (original_middle or corrected_middle)
+            and max(original_middle_words, corrected_middle_words) <= 3
+            and max(len(original_middle), len(corrected_middle)) <= 40
+        )
+
+        if use_compact_highlight:
+            original_parts = [html.escape(original_prefix)]
+            corrected_parts = [html.escape(corrected_prefix)]
+            if original_middle:
+                original_parts.append(
+                    f'<span class="qc-diff qc-diff-original">{html.escape(original_middle)}</span>'
+                )
+            if corrected_middle:
+                corrected_parts.append(
+                    f'<span class="qc-diff qc-diff-corrected">{html.escape(corrected_middle)}</span>'
+                )
+            original_parts.append(html.escape(original_suffix))
+            corrected_parts.append(html.escape(corrected_suffix))
+            return "".join(original_parts), "".join(corrected_parts)
+
+    matcher = SequenceMatcher(a=original_tokens, b=corrected_tokens, autojunk=False)
 
     original_parts = []
     corrected_parts = []
@@ -2629,6 +2678,14 @@ def is_material_fact_candidate_en(sentence: str) -> bool:
         s.lower()
     ))
 
+def should_keep_lead_fact_sentence_en(sentence: str) -> bool:
+    s = (sentence or "").strip()
+    if len(s) < 25:
+        return False
+    if is_english_fact_process_sentence(s) or is_low_value_fact_sentence_en(s):
+        return False
+    return is_material_fact_candidate_en(s)
+
 def extract_fact_statements(article_data):
     """
     Deterministically extract candidate factual statements.
@@ -2638,6 +2695,7 @@ def extract_fact_statements(article_data):
     seen = set()
     fact_check_mode = is_english_fact_check_article(article_data)
     lead_paragraphs_taken = 0
+    main_heading_added = False
 
     def add_statement(s: str):
         key = re.sub(r"\s+", " ", s.lower())
@@ -2650,13 +2708,17 @@ def extract_fact_statements(article_data):
         if ctype not in {"heading", "paragraph", "table"}:
             continue
 
-        if fact_check_mode:
-            if ctype == "heading":
-                lower_heading = (text or "").strip().lower()
-                if any(marker in lower_heading for marker in FACTCHECK_HEADLINE_MARKERS_EN):
-                    add_statement(text.strip())
-                continue
+        if ctype == "heading":
+            heading_text = (text or "").strip()
+            lower_heading = heading_text.lower()
+            if not main_heading_added and len(heading_text.split()) >= 4:
+                add_statement(heading_text)
+                main_heading_added = True
+            elif fact_check_mode and any(marker in lower_heading for marker in FACTCHECK_HEADLINE_MARKERS_EN):
+                add_statement(heading_text)
+            continue
 
+        if fact_check_mode:
             if is_english_fact_process_sentence(text):
                 continue
 
@@ -2670,15 +2732,22 @@ def extract_fact_statements(article_data):
                         add_statement(s)
                 continue
 
-            if ctype == "paragraph" and lead_paragraphs_taken < 3:
+            if ctype == "paragraph" and lead_paragraphs_taken < 5:
                 lead_paragraphs_taken += 1
                 doc = nlp(text)
                 for sent in doc.sents:
                     s = sent.text.strip()
-                    if is_english_fact_process_sentence(s) or is_low_value_fact_sentence_en(s):
-                        continue
-                    if is_material_fact_candidate_en(s):
+                    if should_keep_lead_fact_sentence_en(s):
                         add_statement(s)
+            continue
+
+        if ctype == "paragraph" and lead_paragraphs_taken < 5:
+            lead_paragraphs_taken += 1
+            doc = nlp(text)
+            for sent in doc.sents:
+                s = sent.text.strip()
+                if should_keep_lead_fact_sentence_en(s):
+                    add_statement(s)
             continue
 
         doc = nlp(text)
@@ -2745,6 +2814,14 @@ def normalize_fact_correction(issue: str, correction: str, today_iso: str) -> st
     if is_current_verification_issue(issue):
         return f"Could not verify reliably as of {today_iso}."
     return (correction or "").strip()
+
+def is_generic_verification_fact(issue: str, correction: str, today_iso: str) -> bool:
+    issue_lower = (issue or "").strip().lower()
+    correction_norm = normalize_fact_correction(issue, correction, today_iso).strip().lower()
+    generic_correction = f"Could not verify reliably as of {today_iso}.".lower()
+    return correction_norm == generic_correction and (
+        "needs verification" in issue_lower or "outdated current-affairs claim" in issue_lower
+    )
 
 # =================================================
 # FACT CHECK — SECOND PASS (FAST, STREAMING, STABLE)
@@ -2856,6 +2933,8 @@ TEXT:
             if is_no_issue_fact(issue, correction):
                 continue
             if is_style_only_fact(s, issue, correction):
+                continue
+            if is_generic_verification_fact(issue, correction, today_iso):
                 continue
 
             correction = normalize_fact_correction(issue, correction, today_iso)
