@@ -744,15 +744,22 @@ def compute_qc_score(spelling_count: int, grammar_count: int, editorial_count: i
     )
     return max(0, min(100, int(round(100 - min(100, weighted_penalty)))))
 
-def render_qc_score_summary(spelling_count: int, grammar_count: int, editorial_count: int, fact_count: int, has_ai_error: bool):
+def count_article_words(article_data) -> int:
+    text = "\n".join(
+        t for c, t in (article_data or []) if c in {"heading", "paragraph", "table"}
+    )
+    return len(re.findall(r"\S+", text))
+
+def render_qc_score_summary(spelling_count: int, grammar_count: int, editorial_count: int, fact_count: int, has_ai_error: bool, word_count: int | None = None):
     st.markdown("### QC Summary")
     if has_ai_error:
         st.warning("QC score is unavailable because one or more AI checks failed.")
         return
     total_count = spelling_count + grammar_count + editorial_count + fact_count
     score = compute_qc_score(spelling_count, grammar_count, editorial_count, fact_count)
-    score_col, spelling_col, grammar_col, editorial_col, fact_col, total_col = st.columns(6)
+    score_col, word_col, spelling_col, grammar_col, editorial_col, fact_col, total_col = st.columns(7)
     score_col.metric("QC Score", f"{score}/100")
+    word_col.metric("Words", word_count if word_count is not None else 0)
     spelling_col.metric("Spelling", spelling_count)
     grammar_col.metric("Grammar", grammar_count)
     editorial_col.metric("Editorial", editorial_count)
@@ -2585,6 +2592,45 @@ def chunked(lst, size):
     for i in range(0, len(lst), size):
         yield lst[i:i + size]
 
+def is_no_issue_fact(issue: str, correction: str) -> bool:
+    issue_lower = (issue or "").strip().lower()
+    correction_lower = (correction or "").strip().lower()
+    return issue_lower in {"", "-", "--", "---", "no issue", "no issues"} or correction_lower in {"", "-", "--", "---", "no issue", "no issues"}
+
+def is_style_only_fact(statement: str, issue: str, correction: str) -> bool:
+    lower_issue = (issue or "").strip().lower()
+    lower_correction = (correction or "").strip().lower()
+    combined = f"{lower_issue} {lower_correction}"
+    if re.sub(r"\W+", "", (statement or "").lower()) == re.sub(r"\W+", "", (correction or "").lower()):
+        return True
+    style_markers = (
+        "spelling",
+        "grammar",
+        "punctuation",
+        "style",
+        "format",
+        "wording",
+        "terminology",
+        "abbreviation",
+        "full form",
+        "quote",
+        "comma",
+        "should be",
+        "use ",
+        "replace ",
+        "preferred",
+    )
+    return any(marker in combined for marker in style_markers)
+
+def is_current_verification_issue(issue: str) -> bool:
+    lower = (issue or "").strip().lower()
+    return "needs verification" in lower and "current" in lower
+
+def normalize_fact_correction(issue: str, correction: str, today_iso: str) -> str:
+    if is_current_verification_issue(issue):
+        return f"Could not verify reliably as of {today_iso}."
+    return (correction or "").strip()
+
 # =================================================
 # FACT CHECK — SECOND PASS (FAST, STREAMING, STABLE)
 # =================================================
@@ -2598,7 +2644,7 @@ def gemini_fact_check(article_data, max_chars=FACT_MAX_CHARS, max_items=FACT_MAX
 
     # Full article text (verbatim, unchanged)
     full_text = "\n".join(
-        text for ctype, text in article_data if ctype == "paragraph"
+        text for ctype, text in article_data if ctype in {"heading", "paragraph", "table"}
     )
 
     batches = _batch_statements(statements, max_chars, max_items)
@@ -2628,10 +2674,12 @@ EVALUATION RULES:
 - For present-tense or current-status claims, verify using information available as of today's date
 - For explicitly dated historical claims, judge them against the date or period stated in the article
 - If a statement is likely false, mark Issue as "Likely false" and provide the correct fact
-- If a statement is uncertain or time-sensitive and grounded search is insufficient, mark Issue as "Needs verification (current)"
+- Use "Needs verification (current)" only as a last resort for a materially important current-affairs claim whose present status cannot be verified reliably
+- If grounded search is merely sparse, mixed, or not clearly authoritative for a minor claim, omit the row instead of emitting "Needs verification (current)"
 - If a statement is likely true, omit it (do NOT create a row)
 - NEVER invent facts; if unsure, use "Needs verification (current)"
 - Never rely on stale model memory when grounded search is missing or disagrees
+- If you do use "Needs verification (current)", the Correct Fact must be exactly: "Could not verify reliably as of {today_iso}."
 
 DO NOT:
 - Check grammar, spelling, or style
@@ -2688,6 +2736,14 @@ TEXT:
         for s, issue, correction in matches:
             if s.lower() == "statement":
                 continue
+            if any(x.strip() in {"-", "--", "---"} for x in (s, issue, correction)):
+                continue
+            if is_no_issue_fact(issue, correction):
+                continue
+            if is_style_only_fact(s, issue, correction):
+                continue
+
+            correction = normalize_fact_correction(issue, correction, today_iso)
 
             sig = (
                 re.sub(r"\W+", "", s.lower()),
@@ -2980,6 +3036,7 @@ if not IMPORT_ONLY:
                 editorial_count,
                 fact_count,
                 has_ai_error,
+                count_article_words(article_content),
             )
     
         report_pdf_bytes, report_pdf_error = build_english_qc_report_pdf(
