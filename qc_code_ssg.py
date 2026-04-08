@@ -2548,6 +2548,87 @@ def is_structural_line(text: str) -> bool:
 # =================================================
 # FACT CHECK — STATEMENT EXTRACTION (DETERMINISTIC)
 # =================================================
+FACTCHECK_HEADLINE_MARKERS_EN = (
+    "fact check",
+    "fact-check",
+)
+
+FACTCHECK_CONCLUSION_MARKERS_EN = (
+    "conclusion:",
+    "the claim is false",
+    "the claim is misleading",
+    "the claim is fake",
+    "this claim is false",
+    "this claim is misleading",
+    "there is no evidence",
+    "is unrelated",
+    "is not related",
+)
+
+FACT_PROCESS_MARKERS_EN = (
+    "archive link",
+    "archived link",
+    "shared on",
+    "posted on",
+    "posted this",
+    "shared this",
+    "youtube channel",
+    "google lens",
+    "keyword search",
+    "we searched",
+    "we found",
+    "we checked",
+    "we contacted",
+    "fact checker",
+    "profile scan",
+    "profile was scanned",
+    "click here",
+    "read here",
+    "uploaded on",
+    "uploaded to",
+    "instagram user",
+    "x user",
+    "facebook user",
+)
+
+def is_english_fact_check_article(article_data):
+    for ctype, text in article_data or []:
+        if ctype != "heading":
+            continue
+        lower = (text or "").strip().lower()
+        if any(marker in lower for marker in FACTCHECK_HEADLINE_MARKERS_EN):
+            return True
+
+    return any(
+        any(marker in (text or "").lower() for marker in FACTCHECK_CONCLUSION_MARKERS_EN)
+        for ctype, text in (article_data or [])
+        if ctype == "paragraph"
+    )
+
+def is_english_fact_process_sentence(sentence: str) -> bool:
+    lower = (sentence or "").strip().lower()
+    return any(marker in lower for marker in FACT_PROCESS_MARKERS_EN)
+
+def is_low_value_fact_sentence_en(sentence: str) -> bool:
+    compact = re.sub(r"\s+", " ", (sentence or "").strip())
+    lower = compact.lower()
+    if re.fullmatch(r"(digital desk,?\s+)?[A-Za-z .'-]+,\s+[A-Za-z .'-]+", compact):
+        return True
+    if len(lower.split()) < 6:
+        return True
+    return False
+
+def is_material_fact_candidate_en(sentence: str) -> bool:
+    s = (sentence or "").strip()
+    if len(s) < 35:
+        return False
+    if re.search(r"\d", s):
+        return True
+    return bool(re.search(
+        r"\b(is|was|are|were|has|have|had|will|announced|launched|reported|said|claims|according|warned|confirmed|issued)\b",
+        s.lower()
+    ))
+
 def extract_fact_statements(article_data):
     """
     Deterministically extract candidate factual statements.
@@ -2555,9 +2636,49 @@ def extract_fact_statements(article_data):
     """
     statements = []
     seen = set()
+    fact_check_mode = is_english_fact_check_article(article_data)
+    lead_paragraphs_taken = 0
+
+    def add_statement(s: str):
+        key = re.sub(r"\s+", " ", s.lower())
+        if key in seen:
+            return
+        seen.add(key)
+        statements.append(s)
 
     for ctype, text in article_data:
         if ctype not in {"heading", "paragraph", "table"}:
+            continue
+
+        if fact_check_mode:
+            if ctype == "heading":
+                lower_heading = (text or "").strip().lower()
+                if any(marker in lower_heading for marker in FACTCHECK_HEADLINE_MARKERS_EN):
+                    add_statement(text.strip())
+                continue
+
+            if is_english_fact_process_sentence(text):
+                continue
+
+            if any(marker in (text or "").lower() for marker in FACTCHECK_CONCLUSION_MARKERS_EN):
+                doc = nlp(text)
+                for sent in doc.sents:
+                    s = sent.text.strip()
+                    if is_english_fact_process_sentence(s) or is_low_value_fact_sentence_en(s):
+                        continue
+                    if is_material_fact_candidate_en(s):
+                        add_statement(s)
+                continue
+
+            if ctype == "paragraph" and lead_paragraphs_taken < 3:
+                lead_paragraphs_taken += 1
+                doc = nlp(text)
+                for sent in doc.sents:
+                    s = sent.text.strip()
+                    if is_english_fact_process_sentence(s) or is_low_value_fact_sentence_en(s):
+                        continue
+                    if is_material_fact_candidate_en(s):
+                        add_statement(s)
             continue
 
         doc = nlp(text)
@@ -2565,22 +2686,16 @@ def extract_fact_statements(article_data):
             s = sent.text.strip()
 
             # Basic factual heuristic (NO hard stops, NO assumptions)
-            if len(s.split()) < 6:
+            if is_low_value_fact_sentence_en(s):
                 continue
 
-            if not re.search(
-                r"\b(is|was|are|were|has|have|had|will|announced|launched|reported|said|claims)\b",
-                s.lower()
-            ):
+            if is_english_fact_process_sentence(s):
                 continue
 
-            # Canonical signature → stability
-            key = re.sub(r"\s+", " ", s.lower())
-            if key in seen:
+            if not is_material_fact_candidate_en(s):
                 continue
 
-            seen.add(key)
-            statements.append(s)
+            add_statement(s)
 
     return statements
 
