@@ -2823,6 +2823,17 @@ def is_generic_verification_fact(issue: str, correction: str, today_iso: str) ->
         "needs verification" in issue_lower or "outdated current-affairs claim" in issue_lower
     )
 
+def fact_issue_cluster_key(issue: str, correction: str, today_iso: str):
+    issue_norm = re.sub(r"\s+", " ", (issue or "").strip().lower())
+    correction_norm = re.sub(
+        r"\s+",
+        " ",
+        normalize_fact_correction(issue, correction, today_iso).strip().lower(),
+    )
+    if not issue_norm or not correction_norm:
+        return None
+    return (issue_norm, correction_norm)
+
 # =================================================
 # FACT CHECK — SECOND PASS (FAST, STREAMING, STABLE)
 # =================================================
@@ -2843,6 +2854,7 @@ def gemini_fact_check(article_data, max_chars=FACT_MAX_CHARS, max_items=FACT_MAX
 
     rows = []
     seen = set()
+    seen_clusters = set()
     had_success = False
     last_error = None
     today_iso = datetime.now(timezone.utc).date().isoformat()
@@ -2938,6 +2950,9 @@ TEXT:
                 continue
 
             correction = normalize_fact_correction(issue, correction, today_iso)
+            cluster_key = fact_issue_cluster_key(issue, correction, today_iso)
+            if cluster_key and cluster_key in seen_clusters:
+                continue
 
             sig = (
                 re.sub(r"\W+", "", s.lower()),
@@ -2948,6 +2963,8 @@ TEXT:
                 continue
 
             seen.add(sig)
+            if cluster_key:
+                seen_clusters.add(cluster_key)
             rows.append((s.strip(), issue.strip(), correction.strip()))
 
     if not rows and not had_success:
