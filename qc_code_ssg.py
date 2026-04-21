@@ -1147,6 +1147,7 @@ if not IMPORT_ONLY:
 # =================================================
 PROJECT_ID = str(_secret("VERTEX_PROJECT_ID", "")).strip()
 REGION = "us-central1"
+GEMINI_31_REGION = "global"
 CRED_PATH = "/tmp/gcp_service_account.json"
 MODEL_PRO = "gemini-2.5-pro"
 MODEL_FLASH = "gemini-2.5-flash"
@@ -1168,6 +1169,12 @@ def selected_gemini_model(default_model=None):
     return default_model
 
 
+def gemini_model_region(model_name: str) -> str:
+    if (model_name or "").startswith("gemini-3"):
+        return GEMINI_31_REGION
+    return REGION
+
+
 def current_gemini_model_label(default_model=MODEL_FLASH):
     model = selected_gemini_model(default_model)
     if model == MODEL_GEMINI_31:
@@ -1180,8 +1187,12 @@ def current_gemini_model_label(default_model=MODEL_FLASH):
 
 
 def render_active_model_indicator():
-    st.sidebar.markdown(f"**AI model:** `{current_gemini_model_label()}`")
-    if selected_gemini_model(MODEL_FLASH) == MODEL_GEMINI_31:
+    active_model = selected_gemini_model(MODEL_FLASH)
+    st.sidebar.markdown(
+        f"**AI model:** `{current_gemini_model_label()}`  \n"
+        f"**Vertex location:** `{gemini_model_region(active_model)}`"
+    )
+    if active_model == MODEL_GEMINI_31:
         st.sidebar.caption("A/B test enabled for this login.")
 
 
@@ -1199,13 +1210,13 @@ def load_gcp_credentials():
         st.stop()
 
 @st.cache_resource
-def init_vertex_and_model():
+def init_vertex_and_model(location=REGION):
     creds, project_id = load_gcp_credentials()
 
     client = genai.Client(
         vertexai=True,
         project=project_id,
-        location=REGION,
+        location=location,
         credentials=creds,
     )
 
@@ -1248,9 +1259,11 @@ def build_generate_config(generation_config=None):
     )
 
 def generate_text(prompt, generation_config=None, model_name=None):
-    client, default_model = init_vertex_and_model()
+    _, default_model = init_vertex_and_model()
+    selected_model = selected_gemini_model(model_name or default_model)
+    client, _ = init_vertex_and_model(gemini_model_region(selected_model))
     response = client.models.generate_content(
-        model=selected_gemini_model(model_name or default_model),
+        model=selected_model,
         contents=prompt,
         config=build_generate_config(generation_config),
     )
@@ -1292,9 +1305,11 @@ def render_ai_error(section_label: str, value: str, container=None) -> bool:
     return True
 
 def generate_stream_text(prompt, generation_config=None, model_name=None):
-    client, default_model = init_vertex_and_model()
+    _, default_model = init_vertex_and_model()
+    selected_model = selected_gemini_model(model_name or default_model)
+    client, _ = init_vertex_and_model(gemini_model_region(selected_model))
     stream = client.models.generate_content_stream(
-        model=selected_gemini_model(model_name or default_model),
+        model=selected_model,
         contents=prompt,
         config=build_generate_config(generation_config),
     )
@@ -2990,8 +3005,8 @@ def fact_issue_cluster_key(issue: str, correction: str, today_iso: str):
 # FACT CHECK — SECOND PASS (FAST, STREAMING, STABLE)
 # =================================================
 def gemini_fact_check(article_data, max_chars=FACT_MAX_CHARS, max_items=FACT_MAX_ITEMS, model_name=None):
-    client, _ = init_vertex_and_model()
     selected_model = model_name or selected_gemini_model(MODEL_FLASH)
+    client, _ = init_vertex_and_model(gemini_model_region(selected_model))
 
     # 1️⃣ Deterministic statement universe
     statements = extract_fact_statements(article_data)
