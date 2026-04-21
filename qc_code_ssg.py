@@ -1134,11 +1134,11 @@ def enforce_app_access(app_title: str, app_caption: str, app_name: str):
 
 if not IMPORT_ONLY:
     enforce_app_access(
-        "🧪 Article QC Tool (Gemini 2.5 – Vertex AI)",
+        "🧪 Article QC Tool (Vertex AI)",
         "Spelling · Grammar · Editorial Safety · AI Review",
         "english_qc",
     )
-    st.title("🧪 Article QC Tool (Gemini 2.5 – Vertex AI)")
+    st.title("🧪 Article QC Tool (Vertex AI)")
     st.caption("Spelling · Grammar · Editorial Safety · AI Review")
 
 
@@ -1150,8 +1150,43 @@ REGION = "us-central1"
 CRED_PATH = "/tmp/gcp_service_account.json"
 MODEL_PRO = "gemini-2.5-pro"
 MODEL_FLASH = "gemini-2.5-flash"
+MODEL_GEMINI_31 = "gemini-3.1-pro-preview"
+GEMINI_31_TEST_EMAILS = frozenset({
+    "santosh.pandey@jagrannewmedia.com",
+    "menka.singh@jagrannewmedia.com",
+    "shefali.pandey@jagrannewmedia.com",
+    "kartikay.khosla@jagrannewmedia.com",
+})
 CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
 SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets"
+
+
+def selected_gemini_model(default_model=None):
+    email = _current_access_email()
+    if email in GEMINI_31_TEST_EMAILS:
+        return MODEL_GEMINI_31
+    return default_model
+
+
+def current_gemini_model_label(default_model=MODEL_FLASH):
+    model = selected_gemini_model(default_model)
+    if model == MODEL_GEMINI_31:
+        return "Gemini 3.1 Pro Preview (A/B)"
+    if model == MODEL_PRO:
+        return "Gemini 2.5 Pro"
+    if model == MODEL_FLASH:
+        return "Gemini 2.5 Flash"
+    return model or "Configured default"
+
+
+def render_active_model_indicator():
+    st.sidebar.markdown(f"**AI model:** `{current_gemini_model_label()}`")
+    if selected_gemini_model(MODEL_FLASH) == MODEL_GEMINI_31:
+        st.sidebar.caption("A/B test enabled for this login.")
+
+
+if not IMPORT_ONLY:
+    render_active_model_indicator()
 
 
 def load_gcp_credentials():
@@ -1215,7 +1250,7 @@ def build_generate_config(generation_config=None):
 def generate_text(prompt, generation_config=None, model_name=None):
     client, default_model = init_vertex_and_model()
     response = client.models.generate_content(
-        model=model_name or default_model,
+        model=selected_gemini_model(model_name or default_model),
         contents=prompt,
         config=build_generate_config(generation_config),
     )
@@ -1259,7 +1294,7 @@ def render_ai_error(section_label: str, value: str, container=None) -> bool:
 def generate_stream_text(prompt, generation_config=None, model_name=None):
     client, default_model = init_vertex_and_model()
     stream = client.models.generate_content_stream(
-        model=model_name or default_model,
+        model=selected_gemini_model(model_name or default_model),
         contents=prompt,
         config=build_generate_config(generation_config),
     )
@@ -1904,8 +1939,9 @@ def filter_gemini_rows(raw_table, article_text):
 # =================================================
 # GEMINI QC — OLD TABLE FORMAT (SAFE)
 # =================================================
-def gemini_grammar_review(article_data, max_chars=GRAMMAR_MAX_CHARS):
+def gemini_grammar_review(article_data, max_chars=GRAMMAR_MAX_CHARS, model_name=None):
     init_vertex_and_model()  # ensures vertexai.init() is called
+    selected_model = model_name or selected_gemini_model(MODEL_FLASH)
 
     raw_paragraphs = [
         text
@@ -2020,7 +2056,7 @@ Return output strictly as a table:
                 "top_k": 1,
                 "candidate_count": 1
             },
-            model_name=MODEL_FLASH,
+            model_name=selected_model,
         )
 
     # Parallel batch calls for speed (same logic/output)
@@ -2081,8 +2117,9 @@ Return output strictly as a table:
 # =================================================
 # GEMINI EDITORIAL QC — GUIDELINES
 # =================================================
-def gemini_editorial_review(article_data, web_story=False, health_beauty=False):
+def gemini_editorial_review(article_data, web_story=False, health_beauty=False, model_name=None):
     init_vertex_and_model()
+    selected_model = model_name or selected_gemini_model(MODEL_FLASH)
 
     paragraphs = [
         text[:900]
@@ -2143,7 +2180,7 @@ TEXT:
             "top_k": 1,
             "candidate_count": 1
         },
-        model_name=MODEL_FLASH,
+        model_name=selected_model,
     )
 
 
@@ -2151,18 +2188,18 @@ TEXT:
 # CACHED GEMINI WRAPPERS (STABLE OUTPUTS)
 # =================================================
 @st.cache_data(show_spinner=False)
-def cached_gemini_grammar_review(article_data, max_chars=GRAMMAR_MAX_CHARS):
-    return gemini_grammar_review(article_data, max_chars)
+def cached_gemini_grammar_review(article_data, max_chars=GRAMMAR_MAX_CHARS, model_name=None):
+    return gemini_grammar_review(article_data, max_chars, model_name)
 
 
 @st.cache_data(show_spinner=False)
-def cached_gemini_editorial_review(article_data, web_story=False, health_beauty=False):
-    return gemini_editorial_review(article_data, web_story, health_beauty)
+def cached_gemini_editorial_review(article_data, web_story=False, health_beauty=False, model_name=None):
+    return gemini_editorial_review(article_data, web_story, health_beauty, model_name)
 
 
 @st.cache_data(show_spinner=False)
-def cached_gemini_fact_check(article_data, max_chars=FACT_MAX_CHARS, max_items=FACT_MAX_ITEMS):
-    return gemini_fact_check(article_data, max_chars, max_items)
+def cached_gemini_fact_check(article_data, max_chars=FACT_MAX_CHARS, max_items=FACT_MAX_ITEMS, model_name=None):
+    return gemini_fact_check(article_data, max_chars, max_items, model_name)
 
 
 # ============================
@@ -2952,8 +2989,9 @@ def fact_issue_cluster_key(issue: str, correction: str, today_iso: str):
 # =================================================
 # FACT CHECK — SECOND PASS (FAST, STREAMING, STABLE)
 # =================================================
-def gemini_fact_check(article_data, max_chars=FACT_MAX_CHARS, max_items=FACT_MAX_ITEMS):
+def gemini_fact_check(article_data, max_chars=FACT_MAX_CHARS, max_items=FACT_MAX_ITEMS, model_name=None):
     client, _ = init_vertex_and_model()
+    selected_model = model_name or selected_gemini_model(MODEL_FLASH)
 
     # 1️⃣ Deterministic statement universe
     statements = extract_fact_statements(article_data)
@@ -3019,7 +3057,7 @@ TEXT:
 
         try:
             response = client.models.generate_content(
-                model=MODEL_FLASH,
+                model=selected_model,
                 contents=fact_prompt,
                 config=genai_types.GenerateContentConfig(
                     temperature=0,
@@ -3204,8 +3242,9 @@ if not IMPORT_ONLY:
     
     analysis_key = None
     if current_key:
+        active_model = selected_gemini_model(MODEL_FLASH)
         analysis_key = hashlib.sha256(
-            f"{current_key}|{web_story}|{health_beauty}|{run_gemini_editorial}".encode("utf-8")
+            f"{current_key}|{web_story}|{health_beauty}|{run_gemini_editorial}|{active_model}".encode("utf-8")
         ).hexdigest()
     
     analysis_ready = False
@@ -3224,6 +3263,7 @@ if not IMPORT_ONLY:
     
     if analysis_ready:
         qc_content = run_pipeline(article_content)
+        active_model = selected_gemini_model(MODEL_FLASH)
         results = st.session_state.setdefault("analysis_results", {})
         if "analysis_start" not in results:
             results["analysis_start"] = st.session_state.get("analysis_start", time.perf_counter())
@@ -3314,21 +3354,24 @@ if not IMPORT_ONLY:
                 tasks[executor.submit(
                     cached_gemini_grammar_review,
                     qc_content,
-                    GRAMMAR_MAX_CHARS
+                    GRAMMAR_MAX_CHARS,
+                    active_model,
                 )] = "grammar"
             if run_gemini_editorial and "gemini_editorial" not in results:
                 tasks[executor.submit(
                     cached_gemini_editorial_review,
                     qc_content,
                     web_story,
-                    health_beauty
+                    health_beauty,
+                    active_model,
                 )] = "editorial"
             if "fact_result" not in results:
                 tasks[executor.submit(
                     cached_gemini_fact_check,
                     qc_content,
                     FACT_MAX_CHARS,
-                    FACT_MAX_ITEMS
+                    FACT_MAX_ITEMS,
+                    active_model,
                 )] = "fact"
     
             for future in as_completed(tasks):
