@@ -1150,8 +1150,20 @@ REGION = "us-central1"
 CRED_PATH = "/tmp/gcp_service_account.json"
 MODEL_PRO = "gemini-2.5-pro"
 MODEL_FLASH = "gemini-2.5-flash"
+FACTCHECK_PRO_TEST_EMAILS = frozenset({
+    "santosh.pandey@jagrannewmedia.com",
+    "menka.singh@jagrannewmedia.com",
+    "shefali.pandey@jagrannewmedia.com",
+    "kartikay.khosla@jagrannewmedia.com",
+})
 CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
 SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets"
+
+def factcheck_model_for_current_user(default_model=MODEL_FLASH):
+    email = _current_access_email()
+    if email in FACTCHECK_PRO_TEST_EMAILS:
+        return MODEL_PRO
+    return default_model
 
 
 def load_gcp_credentials():
@@ -2161,8 +2173,8 @@ def cached_gemini_editorial_review(article_data, web_story=False, health_beauty=
 
 
 @st.cache_data(show_spinner=False)
-def cached_gemini_fact_check(article_data, max_chars=FACT_MAX_CHARS, max_items=FACT_MAX_ITEMS):
-    return gemini_fact_check(article_data, max_chars, max_items)
+def cached_gemini_fact_check(article_data, max_chars=FACT_MAX_CHARS, max_items=FACT_MAX_ITEMS, model_name=MODEL_FLASH):
+    return gemini_fact_check(article_data, max_chars, max_items, model_name)
 
 
 # ============================
@@ -2952,7 +2964,7 @@ def fact_issue_cluster_key(issue: str, correction: str, today_iso: str):
 # =================================================
 # FACT CHECK — SECOND PASS (FAST, STREAMING, STABLE)
 # =================================================
-def gemini_fact_check(article_data, max_chars=FACT_MAX_CHARS, max_items=FACT_MAX_ITEMS):
+def gemini_fact_check(article_data, max_chars=FACT_MAX_CHARS, max_items=FACT_MAX_ITEMS, model_name=MODEL_FLASH):
     client, _ = init_vertex_and_model()
 
     # 1️⃣ Deterministic statement universe
@@ -3019,7 +3031,7 @@ TEXT:
 
         try:
             response = client.models.generate_content(
-                model=MODEL_FLASH,
+                model=model_name,
                 contents=fact_prompt,
                 config=genai_types.GenerateContentConfig(
                     temperature=0,
@@ -3328,7 +3340,8 @@ if not IMPORT_ONLY:
                     cached_gemini_fact_check,
                     qc_content,
                     FACT_MAX_CHARS,
-                    FACT_MAX_ITEMS
+                    FACT_MAX_ITEMS,
+                    factcheck_model_for_current_user(MODEL_FLASH),
                 )] = "fact"
     
             for future in as_completed(tasks):
