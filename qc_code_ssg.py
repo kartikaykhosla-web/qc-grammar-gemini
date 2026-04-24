@@ -46,7 +46,7 @@ from bs4 import BeautifulSoup
 from google.oauth2 import service_account
 from google.auth.transport.requests import Request as GoogleAuthRequest
 from difflib import SequenceMatcher
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 
 # ===================== NLP =====================
@@ -1273,6 +1273,240 @@ def generate_stream_text(prompt, generation_config=None, model_name=None):
 # =================================================
 # INPUT EXTRACTION (INLINE-SAFE)
 # =================================================
+JAGRANJOSH_DOMAINS = {"jagranjosh.com", "www.jagranjosh.com"}
+
+JAGRANJOSH_EXCLUDED_SUBTREE_SELECTORS = [
+    "script",
+    "style",
+    "noscript",
+    "form",
+    "nav",
+    "footer",
+    "aside",
+    "header",
+    ".breadcrumb",
+    ".breadcrumbs",
+    ".author",
+    ".byline",
+    ".social-share",
+    ".share",
+    ".related",
+    ".recommended",
+    ".trending",
+    ".read-more",
+    ".also-read",
+    ".comments",
+    ".comment",
+    "[id*='comment']",
+    "[class*='comment']",
+    "[id*='related']",
+    "[class*='related']",
+    "[class*='recommend']",
+    "[class*='trending']",
+    "[class*='newsletter']",
+    "[class*='ads']",
+    ".ad",
+    ".ads",
+]
+
+JAGRANJOSH_SKIP_PREFIXES = (
+    "also read",
+    "also, check",
+    "check out",
+    "read more",
+    "source:",
+    "updated:",
+    "published:",
+    "for latest updates",
+    "follow us",
+    "click here",
+    "advertisement",
+)
+
+JAGRANJOSH_SKIP_CONTAINS = (
+    "leave a comment",
+    "post a comment",
+    "copyright",
+    "all rights reserved",
+    "click here",
+)
+
+def is_jagranjosh_domain(url: str) -> bool:
+    return (urlparse(url).netloc or "").lower() in JAGRANJOSH_DOMAINS
+
+def normalize_match_text(text: str) -> str:
+    return re.sub(r"[^a-z0-9\u0900-\u097f]+", "", (text or "").lower())
+
+def sanitize_extracted_text_en(text: str) -> str:
+    cleaned = re.sub(r"\s+", " ", (text or "").strip())
+    cleaned = re.sub(r"\s*\.{0,3}\s*read more\s*$", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s*also read[:：].*$", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
+
+def should_skip_extracted_text_en(text: str) -> bool:
+    compact = sanitize_extracted_text_en(text)
+    lower = compact.lower()
+    if not compact:
+        return True
+    if lower.startswith(JAGRANJOSH_SKIP_PREFIXES):
+        return True
+    if any(token in lower for token in JAGRANJOSH_SKIP_CONTAINS):
+        return True
+    if re.match(r"^\d+\s*$", compact):
+        return True
+    return False
+
+def append_unique_en(content, seen, ctype: str, raw_text: str, min_len: int) -> bool:
+    text = sanitize_extracted_text_en(raw_text)
+    if len(text) < min_len:
+        return False
+    if should_skip_extracted_text_en(text):
+        return False
+    norm = normalize_match_text(text)
+    if not norm:
+        return False
+    for existing in seen:
+        existing_norm = normalize_match_text(existing)
+        if not existing_norm:
+            continue
+        if norm == existing_norm or norm in existing_norm or existing_norm in norm:
+            return False
+    seen.add(text)
+    content.append((ctype, text))
+    return True
+
+def extract_from_jagranjosh_html_fragment(fragment: str, content, seen):
+    clone = BeautifulSoup(fragment, "html.parser")
+    for node in clone.select(",".join(JAGRANJOSH_EXCLUDED_SUBTREE_SELECTORS)):
+        node.decompose()
+
+    for el in clone.find_all(["h2", "h3", "h4", "h5", "h6"], recursive=True):
+        append_unique_en(content, seen, "heading", el.get_text(separator=" ", strip=True), 8)
+
+    for el in clone.find_all(["p", "li"], recursive=True):
+        raw_txt = re.sub(r"\s+([,.;:!?])", r"\1", el.get_text(separator=" ", strip=True))
+        append_unique_en(content, seen, "paragraph", raw_txt, 20)
+
+    for tr in clone.find_all("tr"):
+        cells = [c.get_text(separator=" ", strip=True) for c in tr.find_all(["th", "td"])]
+        cells = [re.sub(r"\s+", " ", c).strip() for c in cells if c.strip()]
+        if cells:
+            append_unique_en(content, seen, "paragraph", " | ".join(cells), 12)
+
+def extract_from_jagranjosh_next_data(soup, content, seen):
+    script = soup.find("script", {"id": "__NEXT_DATA__", "type": "application/json"})
+    if not script:
+        return
+
+    raw = script.string or script.get_text() or ""
+    if not raw:
+        return
+
+    try:
+        next_data = json.loads(raw)
+    except Exception:
+        return
+
+    page_props = ((next_data or {}).get("props") or {}).get("pageProps") or {}
+    fragments = []
+
+    def push_fragment(value):
+        if isinstance(value, str) and len(value.strip()) >= 40:
+            fragments.append(value)
+
+    def push_fragment_list(values):
+        if isinstance(values, list):
+            for item in values:
+                if isinstance(item, str):
+                    push_fragment(item)
+
+    story_data = (page_props.get("StoryData") or {}).get("data")
+    if isinstance(story_data, dict):
+        push_fragment_list(story_data.get("body_chunks"))
+        for key in ("body2", "body", "schema_article_body"):
+            push_fragment(story_data.get(key))
+
+    exam_data = (page_props.get("ExamDetail") or {}).get("data")
+    if isinstance(exam_data, list):
+        for item in exam_data[:2]:
+            if not isinstance(item, dict):
+                continue
+            for key in ("EXAM_DESCRIPTION", "SUMMARY", "SCHEMA_DESCRIPTION"):
+                push_fragment(item.get(key))
+    elif isinstance(exam_data, dict):
+        for key in ("EXAM_DESCRIPTION", "SUMMARY", "SCHEMA_DESCRIPTION"):
+            push_fragment(exam_data.get(key))
+
+    college_results = (page_props.get("CollegeDetail") or {}).get("results")
+    if isinstance(college_results, list):
+        for item in college_results[:1]:
+            if not isinstance(item, dict):
+                continue
+            for key in (
+                "DESCRIPTION",
+                "PLACEMENT",
+                "ADMISSION_PROCESS",
+                "CUTOFF_DETAIL",
+                "ELIGIBILITY_CRITERIA",
+            ):
+                push_fragment(item.get(key))
+
+    for key in ("CollegeCourses", "courseList"):
+        extras = (page_props.get(key) or {}).get("extras")
+        if isinstance(extras, dict):
+            push_fragment(extras.get("COURSE_DETAIL"))
+
+    for fragment in fragments:
+        lower = fragment.lower()
+        if (
+            "cnt_j0qnre" in lower
+            and "container-wrapper one_column" in lower
+            and "<h" not in lower
+            and "<table" not in lower
+            and "<ul" not in lower
+        ):
+            continue
+
+        if "<" in fragment and ">" in fragment:
+            extract_from_jagranjosh_html_fragment(fragment, content, seen)
+            continue
+
+        for para in re.split(r"\n+|\\n+", fragment):
+            append_unique_en(content, seen, "paragraph", para, 20)
+
+def extract_from_ldjson_article_body_en(soup, content, seen):
+    candidates = []
+
+    def walk(obj):
+        if isinstance(obj, dict):
+            for key, value in obj.items():
+                if key in {"articleBody"} and isinstance(value, str):
+                    if len(value.strip()) >= 80:
+                        candidates.append(value)
+                else:
+                    walk(value)
+        elif isinstance(obj, list):
+            for item in obj:
+                walk(item)
+
+    for script in soup.find_all("script", {"type": "application/ld+json"}):
+        raw = script.string or script.get_text() or ""
+        if not raw:
+            continue
+        try:
+            data = json.loads(raw)
+        except Exception:
+            continue
+        walk(data)
+
+    for body in candidates:
+        if "<" in body and ">" in body:
+            extract_from_jagranjosh_html_fragment(body, content, seen)
+            continue
+        for para in re.split(r"\n+|\\n+", body):
+            append_unique_en(content, seen, "paragraph", para, 20)
+
 def clean_docx(file_path):
     doc = Document(file_path)
     content, seen = [], set()
@@ -1335,7 +1569,15 @@ def clean_article(url):
     # ---------- TITLE ----------
     title = soup.find("h1")
     if title:
-        content.append(("heading", title.get_text(strip=True)))
+        title_text = sanitize_extracted_text_en(title.get_text(separator=" ", strip=True))
+        if title_text:
+            content.append(("heading", title_text))
+            seen.add(title_text)
+
+    if is_jagranjosh_domain(url):
+        extract_from_jagranjosh_next_data(soup, content, seen)
+        extract_from_ldjson_article_body_en(soup, content, seen)
+        return content
 
     # ---------- TRUE FOOTER STOP MARKERS ----------
     HARD_STOP_MARKERS = [
@@ -1372,6 +1614,8 @@ def clean_article(url):
 
         # ⛔ SKIP widget headers / navigation
         if any(marker in lower for marker in SOFT_SKIP_MARKERS):
+            continue
+        if any(marker in lower for marker in ["also, check", "check out", "leave a comment"]):
             continue
 
         # ⛔ SKIP numbered widget lists (1…, 2…, 3…)
