@@ -2,22 +2,14 @@ name: Keep Streamlit Awake
 
 on:
   schedule:
-    - cron: "0 */6 * * *"
+    - cron: "*/30 * * * *"
   workflow_dispatch:
 
 jobs:
   ping-app:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - name: Validate app URL
-        env:
-          STREAMLIT_APP_URL: ${{ vars.STREAMLIT_APP_URL }}
-        run: |
-          if [ -z "$STREAMLIT_APP_URL" ]; then
-            echo "Repository variable STREAMLIT_APP_URL is not set."
-            exit 1
-          fi
-
       - name: Wake and verify Streamlit app
         env:
           STREAMLIT_APP_URL: ${{ vars.STREAMLIT_APP_URL }}
@@ -29,7 +21,8 @@ jobs:
           import urllib.error
           import urllib.request
 
-          url = os.environ["STREAMLIT_APP_URL"].strip()
+          url = (os.getenv("STREAMLIT_APP_URL", "") or "").strip() or "https://qc-grammar-gemini.streamlit.app"
+          print(f"Pinging: {url}")
           ok_statuses = {301, 302, 303, 307, 308}
           headers = {
               "User-Agent": (
