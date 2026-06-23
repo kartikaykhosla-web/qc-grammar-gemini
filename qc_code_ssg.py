@@ -3021,6 +3021,47 @@ def is_current_implication_fact_candidate_en(sentence: str) -> bool:
         lower,
     ))
 
+def is_high_risk_current_status_statement_en(sentence: str) -> bool:
+    s = re.sub(r"\s+", " ", (sentence or "").strip())
+    lower = s.lower()
+    if not is_current_implication_fact_candidate_en(s):
+        return False
+    current_status_markers = (
+        "career",
+        "role",
+        "position",
+        "office",
+        "title",
+        "status",
+        "rank",
+        "ranking",
+        "record",
+        "ownership",
+        "owner",
+        "company",
+        "school",
+        "hospital",
+        "store",
+        "platform",
+        "service",
+        "app",
+        "website",
+        "airport",
+        "station",
+        "available",
+        "availability",
+        "active",
+        "inactive",
+        "existing",
+        "defunct",
+        "current",
+        "currently",
+        "latest",
+        "reigning",
+        "incumbent",
+    )
+    return any(marker in lower for marker in current_status_markers)
+
 def should_keep_lead_fact_sentence_en(sentence: str) -> bool:
     s = (sentence or "").strip()
     if len(s) < 25:
@@ -3429,6 +3470,23 @@ STATEMENTS:
             if cluster_key:
                 seen_clusters.add(cluster_key)
             rows.append((s.strip(), issue.strip(), correction.strip()))
+
+    reported_statements = {
+        re.sub(r"\W+", "", statement.lower())
+        for statement, _, _ in rows
+    }
+    for stmt in current_implication_statements:
+        if not is_high_risk_current_status_statement_en(stmt):
+            continue
+        stmt_key = re.sub(r"\W+", "", stmt.lower())
+        if stmt_key in reported_statements:
+            continue
+        rows.append((
+            stmt.strip(),
+            "Needs verification (current)",
+            f"Could not verify reliably as of {today_iso}.",
+        ))
+        reported_statements.add(stmt_key)
 
     if not rows and not had_success:
         return format_ai_error("fact", last_error or RuntimeError("No Gemini response"))
