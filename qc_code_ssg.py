@@ -3005,6 +3005,22 @@ def is_material_fact_candidate_en(sentence: str) -> bool:
         s.lower()
     ))
 
+def is_current_implication_fact_candidate_en(sentence: str) -> bool:
+    s = re.sub(r"\s+", " ", (sentence or "").strip())
+    lower = s.lower()
+    if len(s) < 35:
+        return False
+    has_time_marker = bool(re.search(
+        r"\b(?:18|19|20)\d{2}\b|\b(?:currently|now|today|as of|latest|this year|last year|presently)\b",
+        lower,
+    ))
+    if not has_time_marker:
+        return False
+    return bool(re.search(
+        r"\b(?:is|are|remains?|continues?|serves as|holds?|owns?|available|unavailable|open|closed|active|inactive|existing|defunct|current|latest|reigning|incumbent|former|record|ranked|largest|smallest|highest|lowest|first|only|last|ended|finished|retired|ceased|stopped|resigned|appointed|elected|joined|left)\b",
+        lower,
+    ))
+
 def should_keep_lead_fact_sentence_en(sentence: str) -> bool:
     s = (sentence or "").strip()
     if len(s) < 25:
@@ -3300,9 +3316,68 @@ TEXT:
         except Exception as exc:
             return "", exc
 
+    def call_current_implication_batch(batch):
+        batch_block = "\n".join(f"- {stmt}" for stmt in batch)
+
+        fact_prompt = f"""
+You are a factual accuracy reviewer for current news copy.
+
+TODAY'S DATE:
+{today_iso}
+
+TASK:
+- Use Google Search grounding to verify statements that combine a time marker with a possible current-status implication
+- Separate the historical event from any implied current condition
+- If the historical event is true but the current implication is false or outdated as of today's date, return a row
+- If the statement is purely historical and true for the stated date or period, omit it
+- If the historical detail itself is false, return a row
+- Quote the EXACT sentence fragment under "Statement"
+- Do NOT paraphrase, rewrite, or infer beyond the statement
+
+Return output strictly as a table:
+| Statement | Issue | Correct Fact |
+
+TEXT:
+{full_text}
+
+STATEMENTS:
+{batch_block}
+"""
+
+        try:
+            response = client.models.generate_content(
+                model=MODEL_FLASH,
+                contents=fact_prompt,
+                config=genai_types.GenerateContentConfig(
+                    temperature=0.2,
+                    topP=1,
+                    topK=1,
+                    candidateCount=1,
+                    maxOutputTokens=768,
+                    seed=0,
+                    responseMimeType="text/plain",
+                    tools=[genai_types.Tool(google_search=genai_types.GoogleSearch())],
+                ),
+            )
+            return response.text or "", None
+        except Exception as exc:
+            return "", exc
+
     batch_results = []
     for batch in batches:
         out, exc = call_batch(batch)
+        if exc is not None:
+            last_error = exc
+            continue
+        had_success = True
+        batch_results.append(out)
+
+    current_implication_statements = [
+        stmt for stmt in statements
+        if is_current_implication_fact_candidate_en(stmt)
+    ]
+    for batch in _batch_statements(current_implication_statements, max_chars, max_items):
+        out, exc = call_current_implication_batch(batch)
         if exc is not None:
             last_error = exc
             continue
