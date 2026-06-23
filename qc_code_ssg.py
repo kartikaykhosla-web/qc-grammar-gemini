@@ -3404,6 +3404,59 @@ STATEMENTS:
         except Exception as exc:
             return "", exc
 
+    def call_current_status_verifier_batch(batch):
+        batch_block = "\n".join(f"- {stmt}" for stmt in batch)
+
+        fact_prompt = f"""
+You are a factual accuracy reviewer for current news copy.
+
+TODAY'S DATE:
+{today_iso}
+
+TASK:
+- Use Google Search grounding to verify each statement's current-status implication
+- Return exactly one row for every statement listed under STATEMENTS
+- Decompose mixed statements into:
+  1. historical event or date claim
+  2. implied current status, role, availability, existence, record, rank, ownership, or final condition
+- If the historical part is true but the current implication is false or outdated, Status must be ISSUE
+- If the statement is fully accurate as written, Status must be VERIFIED
+- Use UNVERIFIABLE only if grounded search cannot establish the current implication after checking reliable sources
+- For ISSUE rows, Correct Fact must give the specific corrected fact; do not use generic uncertainty wording
+- For UNVERIFIABLE rows, Correct Fact must be exactly: "Could not verify reliably as of {today_iso}."
+- Quote the EXACT sentence fragment under "Statement"
+
+Return output strictly as a table:
+| Statement | Status | Issue | Correct Fact |
+
+Allowed Status values: ISSUE, VERIFIED, UNVERIFIABLE
+
+TEXT:
+{full_text}
+
+STATEMENTS:
+{batch_block}
+"""
+
+        try:
+            response = client.models.generate_content(
+                model=MODEL_FLASH,
+                contents=fact_prompt,
+                config=genai_types.GenerateContentConfig(
+                    temperature=0.1,
+                    topP=1,
+                    topK=1,
+                    candidateCount=1,
+                    maxOutputTokens=1024,
+                    seed=0,
+                    responseMimeType="text/plain",
+                    tools=[genai_types.Tool(google_search=genai_types.GoogleSearch())],
+                ),
+            )
+            return response.text or "", None
+        except Exception as exc:
+            return "", exc
+
     batch_results = []
     for batch in batches:
         out, exc = call_batch(batch)
@@ -3417,6 +3470,10 @@ STATEMENTS:
         stmt for stmt in statements
         if is_current_implication_fact_candidate_en(stmt)
     ]
+    high_risk_current_status_statements = [
+        stmt for stmt in current_implication_statements
+        if is_high_risk_current_status_statement_en(stmt)
+    ]
     for batch in _batch_statements(current_implication_statements, max_chars, max_items):
         out, exc = call_current_implication_batch(batch)
         if exc is not None:
@@ -3424,6 +3481,15 @@ STATEMENTS:
             continue
         had_success = True
         batch_results.append(out)
+
+    current_status_results = []
+    for batch in _batch_statements(high_risk_current_status_statements, max_chars, max_items):
+        out, exc = call_current_status_verifier_batch(batch)
+        if exc is not None:
+            last_error = exc
+            continue
+        had_success = True
+        current_status_results.append(out)
 
     for out in batch_results:
         if not out:
@@ -3471,22 +3537,55 @@ STATEMENTS:
                 seen_clusters.add(cluster_key)
             rows.append((s.strip(), issue.strip(), correction.strip()))
 
-    reported_statements = {
-        re.sub(r"\W+", "", statement.lower())
-        for statement, _, _ in rows
-    }
-    for stmt in current_implication_statements:
-        if not is_high_risk_current_status_statement_en(stmt):
+    for out in current_status_results:
+        if not out:
             continue
-        stmt_key = re.sub(r"\W+", "", stmt.lower())
-        if stmt_key in reported_statements:
-            continue
-        rows.append((
-            stmt.strip(),
-            "Needs verification (current)",
-            f"Could not verify reliably as of {today_iso}.",
-        ))
-        reported_statements.add(stmt_key)
+
+        matches = re.findall(
+            r"\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|",
+            out
+        )
+
+        for s, status, issue, correction in matches:
+            if s.lower() == "statement":
+                continue
+            status_upper = (status or "").strip().upper()
+            if status_upper == "VERIFIED":
+                continue
+            if status_upper not in {"ISSUE", "UNVERIFIABLE"}:
+                continue
+            if any(x.strip() in {"-", "--", "---"} for x in (s, status, issue, correction)):
+                continue
+            if is_style_only_fact(s, issue, correction):
+                continue
+            if is_dynamic_schedule_or_pricing_fact(s, issue, correction):
+                continue
+            if is_self_conflicting_fact_correction(s, issue, correction):
+                continue
+
+            if status_upper == "UNVERIFIABLE":
+                issue = "Needs verification (current)"
+                correction = f"Could not verify reliably as of {today_iso}."
+            else:
+                correction = (correction or "").strip()
+                if not correction or correction in {"-", "--", "---"}:
+                    continue
+
+            cluster_key = fact_issue_cluster_key(issue, correction, today_iso)
+            if cluster_key and cluster_key in seen_clusters:
+                continue
+
+            sig = (
+                re.sub(r"\W+", "", s.lower()),
+                re.sub(r"\W+", "", issue.lower())
+            )
+            if sig in seen:
+                continue
+
+            seen.add(sig)
+            if cluster_key:
+                seen_clusters.add(cluster_key)
+            rows.append((s.strip(), issue.strip(), correction.strip()))
 
     if not rows and not had_success:
         return format_ai_error("fact", last_error or RuntimeError("No Gemini response"))
