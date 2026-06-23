@@ -3285,7 +3285,7 @@ TEXT:
                 model=MODEL_FLASH,
                 contents=fact_prompt,
                 config=genai_types.GenerateContentConfig(
-                    temperature=0,
+                    temperature=0.2,
                     topP=1,
                     topK=1,
                     candidateCount=1,
