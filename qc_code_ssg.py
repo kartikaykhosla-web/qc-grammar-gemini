@@ -3254,7 +3254,7 @@ SCOPE:
 
 EVALUATION RULES:
 - For present-tense or current-status claims, verify using information available as of today's date
-- Treat claims that a living public figure "ended", "finished", or "retired from" their whole career as current-status claims even if a year is mentioned
+- If a dated statement also implies an ongoing status, identity, availability, role, record, ownership, ranking, existence, or other current condition, verify that current implication as of today's date instead of treating the date as the only check
 - For explicitly dated historical claims, judge them against the date or period stated in the article
 - Return "Issue" and "Correct Fact" in the same language as the article text
 - If a statement is likely false, mark Issue as "Likely false" and provide the correct fact
